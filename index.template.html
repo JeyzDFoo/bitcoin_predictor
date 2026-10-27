@@ -116,7 +116,7 @@
       <div class="foot" id="foot"></div>
     </div>
   </div>
-  <div class="foot">Bands and the 90-day track record are calibrated at the default settings (recency 0.5, shock clip 2.5σ). Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), calibrated on this same history, not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare, Kraken or Coinbase when online.</div>
+  <div class="foot">Bands are calibrated at the default settings (recency 0.5, shock clip 2.5σ); the 90-day track record is recomputed live for your settings. Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), calibrated on this same history, not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare, Kraken or Coinbase when online.</div>
 </div>
 
 <script>
@@ -145,9 +145,9 @@ function cleanSeries(k){            // causal shock clipping: |daily log return|
   return out;
 }
 const lastDate = () => PX.t0 + (PX.p.length - 1) * DAY;
-function refreshSignals(cutoff = lastDate()){
+function refreshSignals(cutoff = lastDate(), target = SIG){
   const key = state.clip + ':' + PX.p.length; if (key !== CLkey){ CL = cleanSeries(state.clip); CLkey = key; }
-  SIG.fill(NaN);
+  target.fill(NaN);
   for (let k = 0; k < 4; k++){
     const s = HAL[k], e = HAL[k + 1];
     const i0 = Math.round((s - PX.t0) / DAY), i1 = Math.min(Math.round((e - PX.t0) / DAY), PX.p.length - 1, Math.round((cutoff - PX.t0) / DAY));
@@ -160,7 +160,7 @@ function refreshSignals(cutoff = lastDate()){
       const g = n / (N - 1); if (g > phMax) break;
       while (j < ph.length - 2 && ph[j + 1] < g) j++;
       const f = ph[j + 1] > ph[j] ? (g - ph[j]) / (ph[j + 1] - ph[j]) : 0;
-      SIG[k * N + n] = lv[j] + f * (lv[j + 1] - lv[j]);
+      target[k * N + n] = lv[j] + f * (lv[j + 1] - lv[j]);
     }
   }
 }
@@ -259,10 +259,10 @@ const JSEngine = (() => {
     for (let n = 0; n < N; n++){ convRow(x, taps, n, row); let s = b; for (let j = 0; j < taps; j++) s += row[j] * h[j]; out[n] = s; }
     return out;
   }
-  function run(taps, epochs, l2, smooth, cur, gamma){
+  function run(taps, epochs, l2, smooth, cur, gamma, sigArr = SIG){
     taps = Math.max(3, Math.min(MAXT, taps)); if (taps % 2 === 0) taps++;
     cur = Math.max(2, Math.min(3, cur));
-    const c = [0, 1, 2, 3].map(k => SIG.subarray(k * N, (k + 1) * N));
+    const c = [0, 1, 2, 3].map(k => sigArr.subarray(k * N, (k + 1) * N));
     let iLast = 0; for (let i = N - 1; i >= 0; i--) if (!Number.isNaN(c[cur][i])){ iLast = i; break; }
     const vpairs = [], fpairs = [];
     for (let j = 0; j < cur; j++){ fpairs.push([c[j], c[j + 1], gamma ** (cur - 1 - j)]); if (j < cur - 1) vpairs.push([c[j], c[j + 1], gamma ** (cur - 2 - j)]); }
@@ -285,7 +285,8 @@ async function loadWasm(){
   const { instance } = await WebAssembly.instantiate(await resp.arrayBuffer(), {});
   const x = instance.exports, mem = () => x.memory.buffer;
   new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG);
-  return { setSig(){ new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG); }, run(taps, epochs, l2, smooth, cur, gamma){
+  return { setSig(){ new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG); }, run(taps, epochs, l2, smooth, cur, gamma, sigArr = SIG){
+    new Float64Array(mem(), x.sig_ptr(), 4 * N).set(sigArr);
     x.run(taps, epochs, l2, smooth, cur, gamma);
     const st = new Float64Array(mem(), x.stats_ptr(), 8), t = st[5];
     return { h: Float64Array.from(new Float64Array(mem(), x.h_ptr(), t)),
@@ -387,7 +388,7 @@ function readout(res, ms){
   $('s60c').textContent = real.length > 1 ? 'actual by ' + dfmt(rl[0]) + ': ' + fmtUsd(rl[1]) + ' (' + (rl[1] >= p0 ? '+' : '') + ((rl[1] / p0 - 1) * 100).toFixed(1) + '%)' : '';
   $('sPrice').textContent = fmtUsd(pL * Math.exp(dH));
   $('sBand').textContent = fmtUsd(pL * Math.exp(dH - res.valRmse)) + ' – ' + fmtUsd(pL * Math.exp(dH + res.valRmse));
-  const tr = trendSignal(res), TT = trendTable(res.taps), flat = Math.abs(tr.pred) < 0.03, up = tr.pred >= 0;
+  const tr = trendSignal(res), TT = track || trendTable(res.taps), flat = Math.abs(tr.pred) < 0.03, up = tr.pred >= 0;
   $('sTrend').textContent = flat ? '◆ Flat ' + pct(tr.pred) : (up ? '▲ Up ' : '▼ Down ') + pct(tr.pred);
   $('sTrend').style.color = flat ? 'var(--mute)' : up ? 'var(--good)' : 'var(--bad)';
   $('sTrendB').textContent = 'track record: direction right ' + Math.round(TT.hit * 100) + '% (always-up ' + Math.round(Math.max(TT.up, 1 - TT.up) * 100) + '%)';
@@ -402,13 +403,13 @@ function readout(res, ms){
     ' · Cycle ' + (res.cur + 1) + ' observed ' + Math.round(res.iLast / (N - 1) * 100) + '% · filter spans ±' + Math.round((res.taps >> 1) * td() / N) + ' days';
 }
 
-let last = null, timer = null, playing = false;
+let last = null, timer = null, playing = false, lastMs = 0, track = null, trackKey = '', trackJob = 0, trackTimer = null;
 const iso = ms => new Date(ms).toISOString().slice(0, 10);
 function compute(epochs){
   const t0 = performance.now();
   last = engine.run(state.taps, 0, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value), state.cur, state.gamma);
   last.cur = state.cur;
-  readout(last, performance.now() - t0); draw(last); drawStrip(); drawTrend(last);
+  lastMs = performance.now() - t0; readout(last, lastMs); draw(last); drawStrip(); drawTrend(last); startTrack();
 }
 function schedule(){ clearTimeout(timer); compute(0); }
 
@@ -420,7 +421,7 @@ function trendSignal(res){
   return { pred: projLog(res, t1) - projLog(res, t), actual: t + 90 * DAY <= lastDate() ? Math.log(px(t + 90 * DAY) / px(t)) : null };
 }
 function drawTrend(res){
-  const T = trendTable(state.taps), sig = trendSignal(res), [g, W, H] = setupCanvas($('trend'));
+  const T = track || trendTable(state.taps), sig = trendSignal(res), [g, W, H] = setupCanvas($('trend'));
   const L = 46, R = 10, Tp = 8, B = 22, pw = W - L - R, ph = H - Tp - B;
   const x0 = T.d[0] - 3.5 * DAY, x1 = lastDate() + 3.5 * DAY;
   let m = 0.3; T.p.concat(T.r, [sig.pred]).forEach(v => m = Math.max(m, Math.min(1.2, Math.abs(v)))); m *= 1.08;
@@ -428,6 +429,14 @@ function drawTrend(res){
   const good = css('--good'), bad = css('--bad'), acc = css('--accent');
   g.clearRect(0, 0, W, H); g.font = '11px system-ui';
   T.d.forEach((d, i) => { g.fillStyle = (Math.sign(T.p[i]) === Math.sign(T.r[i]) ? good + '2e' : bad + '38'); g.fillRect(X(d - 3.5 * DAY), Tp, X(d + 3.5 * DAY) - X(d - 3.5 * DAY) + 0.6, ph); });
+  const hatch = (xa_, xb_, label) => {
+    if (xb_ - xa_ < 3) return;
+    g.fillStyle = css('--line'); g.globalAlpha = 0.35; g.fillRect(xa_, Tp, xb_ - xa_, ph); g.globalAlpha = 1;
+    g.fillStyle = css('--mute'); g.font = '10px system-ui'; g.textAlign = 'center'; g.save(); g.translate((xa_ + xb_) / 2 + 3, Tp + ph / 2);
+    if (xb_ - xa_ < 70) g.rotate(-Math.PI / 2); g.fillText(label, 0, 0); g.restore(); g.font = '11px system-ui';
+  };
+  for (let i = 1; i < T.d.length; i++) if (T.d[i] - T.d[i - 1] > 10 * DAY) hatch(X(T.d[i - 1] + 3.5 * DAY), X(T.d[i] - 3.5 * DAY), 'halving: no test');
+  hatch(X(T.d[T.d.length - 1] + 3.5 * DAY), X(x1), 'outcome pending');
   g.strokeStyle = css('--line'); g.fillStyle = css('--mute'); g.textAlign = 'right'; g.lineWidth = 1;
   [-0.5, 0, 0.5, 1].filter(v => Math.abs(v) <= m).forEach(v => { g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke(); g.fillText(pct(v), L - 6, Y(v) + 4); });
   g.textAlign = 'center';
@@ -438,7 +447,32 @@ function drawTrend(res){
   g.strokeStyle = acc; g.lineWidth = 2; g.fillStyle = css('--bg'); g.beginPath(); g.arc(xa, Y(sig.pred), 5, 0, 7); g.fill(); g.stroke();
   if (sig.actual !== null){ g.fillStyle = css('--g3'); g.beginPath(); g.arc(xa, Y(sig.actual), 4, 0, 7); g.fill(); }
   $('trendNote').textContent = '90-day return by as-of date: predicted (blue) vs actual (grey). Green columns = direction right, red = wrong. Walk-forward, direction right ' +
-    Math.round(T.hit * 100) + '% of ' + T.n + ' weekly dates (always-up: ' + Math.round(Math.max(T.up, 1 - T.up) * 100) + '%). Ring = the selected date\'s prediction.';
+    Math.round(T.hit * 100) + '% of ' + T.n + ' weekly dates (always-up: ' + Math.round(Math.max(T.up, 1 - T.up) * 100) + '%). Ring = the selected date\'s prediction. Shaded gaps: "halving" = a 90-day forecast would cross a halving, so it isn\'t tested; "outcome pending" = the last 90 days, whose result isn\'t known yet.' + (T.live ? ' Recomputed live for your current settings.' : ' Precomputed at the default settings.');
+}
+const WARMUP = { 2: 120, 3: 30 };
+function startTrack(){
+  const key = [state.taps, state.gamma, state.clip, PX.p.length, $('l2').value, $('smooth').value].join('|');
+  if (key === trackKey) return;
+  const job = ++trackJob; clearTimeout(trackTimer);
+  trackTimer = setTimeout(() => runTrack(job, key), 300);
+}
+async function runTrack(job, key){
+  const dates = [], l2 = 10 ** parseFloat($('l2').value), sm = 10 ** parseFloat($('smooth').value);
+  for (const k of [2, 3]) for (let t = HAL[k] + WARMUP[k] * DAY; t + 90 * DAY <= Math.min(lastDate(), HAL[k + 1]); t += 7 * DAY) dates.push([t, k]);
+  const buf = new Float64Array(4 * N), d = [], p = [], r = [], px = ms => PX.p[Math.round((ms - PX.t0) / DAY)];
+  $('trendNote').textContent = 'Recomputing the walk-forward track record for the current settings…';
+  for (let i = 0; i < dates.length; i++){
+    if (job !== trackJob) return;
+    const [t, k] = dates[i];
+    refreshSignals(t, buf);
+    const res = engine.run(state.taps, 0, l2, sm, k, state.gamma, buf); res.cur = k;
+    d.push(t); p.push(projLog(res, t + 90 * DAY) - projLog(res, t)); r.push(Math.log(px(t + 90 * DAY) / px(t)));
+    if (i % 5 === 4) await new Promise(res_ => setTimeout(res_, 0));
+  }
+  if (job !== trackJob) return;
+  const n = d.length, hit = d.filter((_, i) => Math.sign(p[i]) === Math.sign(r[i])).length / n, up = r.filter(v => v > 0).length / n;
+  track = { d, p, r, hit, up, n, live: true }; trackKey = key;
+  if (last){ readout(last, lastMs); drawTrend(last); }
 }
 function drawStrip(){
   const [g, W, H] = setupCanvas($('strip')), a = HAL[2], b = lastDate(), L = 4, R = 4, T = 4, B = 4, pw = W - L - R, ph = H - T - B;
