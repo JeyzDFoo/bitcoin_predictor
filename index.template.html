@@ -51,10 +51,10 @@
   <div class="sub">A learned FIR filter maps each halving cycle onto the next. Turn the dial to change the number of taps; the filter retrains live.</div>
 
   <div class="stats">
+    <div class="stat"><div class="k">Next 60 days</div><div class="v" id="s60">–</div><div class="s" id="s60b">–</div></div>
     <div class="stat"><div class="k">Projected at halving</div><div class="v" id="sPrice">–</div><div class="s" id="sBand">–</div></div>
     <div class="stat"><div class="k">Filter gain</div><div class="v" id="sGain">–</div><div class="s">amplitude vs. prior cycle</div></div>
-    <div class="stat"><div class="k">Timing shift</div><div class="v" id="sShift">–</div><div class="s">vs. prior cycle</div></div>
-    <div class="stat"><div class="k">Out-of-sample error</div><div class="v" id="sVal">–</div><div class="s" id="sTime">–</div></div>
+    <div class="stat"><div class="k">Cycle error (out-of-sample)</div><div class="v" id="sVal">–</div><div class="s" id="sTime">–</div></div>
   </div>
 
   <div class="grid">
@@ -80,24 +80,56 @@
 
     <div class="panel">
       <div class="legend">
-        <span><i style="background:var(--g1)"></i>Cycle 1</span>
-        <span><i style="background:var(--g2)"></i>Cycle 2</span>
-        <span><i style="background:var(--g3)"></i>Cycle 3</span>
-        <span><i style="background:var(--accent)"></i>Cycle 4 actual / projected</span>
+        <span><i style="background:var(--g3)"></i>Last 30 days (actual)</span>
+        <span><i style="background:var(--accent)"></i>Next 60 days (projected)</span>
       </div>
       <canvas id="main"></canvas>
       <canvas id="imp"></canvas>
       <div class="foot" id="foot"></div>
     </div>
   </div>
-  <div class="foot">Three cycles of history: a pattern-matching exercise, not a forecast or investment advice. Data: Coin Metrics open dataset (GitHub).</div>
+  <div class="foot">Three cycles of history: a pattern-matching exercise, not a forecast or investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare when online.</div>
 </div>
 
 <script>
 const DATA = __DATA__;
 const N = DATA.n, MAXT = 101;
 const SIG = new Float64Array(4 * N).fill(NaN);
-DATA.signals.forEach((s, k) => s.forEach((v, i) => { SIG[k * N + i] = v === null ? NaN : v; }));
+const DAY = 864e5, HAL = DATA.halvings.map(d => Date.parse(d + 'T00:00:00Z'));
+let PX = { t0: Date.parse(DATA.daily.start + 'T00:00:00Z'), p: Float64Array.from(DATA.daily.p) };
+let BASES = DATA.base.slice();
+const lastDate = () => PX.t0 + (PX.p.length - 1) * DAY;
+function refreshSignals(){
+  SIG.fill(NaN);
+  for (let k = 0; k < 4; k++){
+    const s = HAL[k], e = HAL[k + 1];
+    const i0 = Math.round((s - PX.t0) / DAY), i1 = Math.min(Math.round((e - PX.t0) / DAY), PX.p.length - 1);
+    const p0 = PX.p[i0]; BASES[k] = p0;
+    const ph = [], lv = [];
+    for (let i = i0; i <= i1; i++){ ph.push((PX.t0 + i * DAY - s) / (e - s)); lv.push(Math.log(PX.p[i] / p0)); }
+    const phMax = ph[ph.length - 1]; let j = 0;
+    for (let n = 0; n < N; n++){
+      const g = n / (N - 1); if (g > phMax) break;
+      while (j < ph.length - 2 && ph[j + 1] < g) j++;
+      const f = ph[j + 1] > ph[j] ? (g - ph[j]) / (ph[j + 1] - ph[j]) : 0;
+      SIG[k * N + n] = lv[j] + f * (lv[j + 1] - lv[j]);
+    }
+  }
+}
+refreshSignals();
+async function fetchLatest(){
+  try {
+    const r = await fetch('https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=400');
+    const rows = (await r.json()).Data.Data.filter(d => d.close > 0);
+    const last = lastDate(), map = new Map();
+    rows.forEach(d => { const t = Math.floor(d.time * 1000 / DAY) * DAY; if (t > last) map.set(t, d.close); });
+    if (!map.size) return false;
+    const tEnd = Math.max(...map.keys()), n = Math.round((tEnd - PX.t0) / DAY) + 1, p = new Float64Array(n);
+    p.set(PX.p); let prev = PX.p[PX.p.length - 1];
+    for (let i = PX.p.length; i < n; i++){ const t = PX.t0 + i * DAY; prev = map.has(t) ? map.get(t) : prev; p[i] = prev; }
+    PX = { t0: PX.t0, p }; return true;
+  } catch (e) { return false; }
+}
 
 /* ---------- JS engine (same algorithm as src/lib.rs) ---------- */
 const JSEngine = (() => {
@@ -169,7 +201,7 @@ async function loadWasm(){
   const { instance } = await WebAssembly.instantiate(await resp.arrayBuffer(), {});
   const x = instance.exports, mem = () => x.memory.buffer;
   new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG);
-  return { run(taps, epochs, l2, smooth){
+  return { setSig(){ new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG); }, run(taps, epochs, l2, smooth){
     x.run(taps, epochs, l2, smooth);
     const st = new Float64Array(mem(), x.stats_ptr(), 8), t = st[5];
     return { h: Float64Array.from(new Float64Array(mem(), x.h_ptr(), t)),
@@ -192,35 +224,42 @@ function setupCanvas(c){
   const g = c.getContext('2d'); g.setTransform(d, 0, 0, d, 0, 0); return [g, r.width, r.height];
 }
 
+const projLog = (res, tMs) => {
+  const g = (tMs - HAL[3]) / (HAL[4] - HAL[3]) * (N - 1), i = Math.max(0, Math.min(N - 2, Math.floor(g))), f = g - i;
+  return res.proj[i] + f * (res.proj[i + 1] - res.proj[i]);
+};
+const dfmt = t => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+function zoomSeries(res){
+  const tL = lastDate(), tA = tL - 30 * DAY, tB = tL + 60 * DAY, base = BASES[3];
+  const off = Math.log(PX.p[PX.p.length - 1] / base) - projLog(res, tL);
+  const act = [], pr = [];
+  for (let t = tA; t <= tL; t += DAY) act.push([t, PX.p[Math.round((t - PX.t0) / DAY)]]);
+  for (let t = tL; t <= tB; t += DAY) pr.push([t, base * Math.exp(projLog(res, t) + off)]);
+  return { tL, tA, tB, act, pr };
+}
 function draw(res){
-  const base = DATA.base[3];
-  // main chart
+  const acc = css('--accent'), { tL, tA, tB, act, pr } = zoomSeries(res);
   let [g, W, H] = setupCanvas($('main'));
-  const L = 46, R = 10, T = 8, B = 28, pw = W - L - R, ph = H - T - B;
-  const ymin = -1.5, ymax = 7.5;
-  const X = p => L + p * pw, Y = v => T + (1 - (v - ymin) / (ymax - ymin)) * ph;
-  g.clearRect(0, 0, W, H); g.font = '11px system-ui'; g.fillStyle = css('--mute'); g.strokeStyle = css('--line'); g.lineWidth = 1;
-  for (let v = -1; v <= 7; v += 1){ g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke(); g.textAlign = 'right'; g.fillText(v, L - 6, Y(v) + 4); }
-  for (let p = 0; p <= 1.001; p += 0.2){ g.textAlign = 'center'; g.fillText(p.toFixed(1), X(p), H - 10); }
-  g.textAlign = 'left'; g.fillText('log(price / price at halving)', L + 4, T + 12);
-  const cols = [css('--g1'), css('--g2'), css('--g3')];
-  for (let k = 0; k < 3; k++){
-    g.strokeStyle = cols[k]; g.lineWidth = 1.2; g.beginPath();
-    for (let i = 0; i < N; i++){ const p = i / (N - 1), v = SIG[k * N + i]; i ? g.lineTo(X(p), Y(v)) : g.moveTo(X(p), Y(v)); }
-    g.stroke();
+  const L = 54, R = 54, T = 10, B = 28, pw = W - L - R, ph = H - T - B;
+  let lo = Infinity, hi = -Infinity; [...act, ...pr].forEach(([, v]) => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+  const pad = (hi - lo) * 0.1 || hi * 0.05; lo -= pad; hi += pad;
+  const raw = (hi - lo) / 5, mag = 10 ** Math.floor(Math.log10(raw)), step = [1, 2, 2.5, 5, 10].find(m => m * mag >= raw) * mag;
+  const X = t => L + (t - tA) / (tB - tA) * pw, Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
+  g.clearRect(0, 0, W, H); g.font = '11px system-ui'; g.lineWidth = 1;
+  g.fillStyle = acc + '10'; g.fillRect(X(tL), T, X(tB) - X(tL), ph);
+  g.strokeStyle = css('--line'); g.fillStyle = css('--mute'); g.textAlign = 'right';
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step){
+    g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke();
+    g.fillText('$' + (v / 1000).toFixed(step < 1000 ? 1 : 0) + 'k', L - 6, Y(v) + 4);
   }
-  const acc = css('--accent'), iL = res.iLast;
-  // band
-  g.fillStyle = acc + '22'; g.beginPath();
-  for (let i = iL; i < N; i++) g.lineTo(X(i / (N - 1)), Y(res.proj[i] + res.valRmse));
-  for (let i = N - 1; i >= iL; i--) g.lineTo(X(i / (N - 1)), Y(res.proj[i] - res.valRmse));
-  g.closePath(); g.fill();
-  g.strokeStyle = acc; g.lineWidth = 2.4; g.beginPath();
-  for (let i = 0; i <= iL; i++){ const p = i / (N - 1); i ? g.lineTo(X(p), Y(SIG[3 * N + i])) : g.moveTo(X(p), Y(SIG[3 * N + i])); }
-  g.stroke();
-  g.setLineDash([6, 4]); g.beginPath();
-  for (let i = iL; i < N; i++){ const p = i / (N - 1); i === iL ? g.moveTo(X(p), Y(res.proj[i])) : g.lineTo(X(p), Y(res.proj[i])); }
-  g.stroke(); g.setLineDash([]);
+  g.textAlign = 'center';
+  for (let t = tA; t <= tB + 1; t += 15 * DAY) g.fillText(dfmt(t), Math.min(Math.max(X(t), L + 14), W - R - 14), H - 10);
+  g.strokeStyle = css('--mute'); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(tL), T); g.lineTo(X(tL), T + ph); g.stroke(); g.setLineDash([]);
+  g.fillStyle = css('--mute'); g.textAlign = 'right'; g.fillText('last data ' + dfmt(tL), X(tL) - 6, T + 12);
+  g.strokeStyle = css('--g3'); g.lineWidth = 2.4; g.beginPath(); act.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke();
+  g.strokeStyle = acc; g.setLineDash([6, 4]); g.beginPath(); pr.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke(); g.setLineDash([]);
+  const [te, ve] = pr[pr.length - 1]; g.fillStyle = acc; g.beginPath(); g.arc(X(te), Y(ve), 4, 0, 7); g.fill();
+  g.textAlign = 'left'; g.fillText('$' + Math.round(ve / 100) / 10 + 'k', X(te) + 7, Y(ve) + 4);
 
   // impulse response
   [g, W, H] = setupCanvas($('imp'));
@@ -240,15 +279,17 @@ function draw(res){
 }
 
 function readout(res, ms){
-  const price = DATA.base[3] * Math.exp(res.proj[N - 1]);
+  const { act, pr } = zoomSeries(res), p0 = act[act.length - 1][1], p60 = pr[pr.length - 1][1];
+  $('s60').textContent = fmtUsd(p60);
+  $('s60b').textContent = (p60 >= p0 ? '+' : '') + ((p60 / p0 - 1) * 100).toFixed(1) + '% from ' + fmtUsd(p0);
+  const price = BASES[3] * Math.exp(res.proj[N - 1]);
   $('sPrice').textContent = fmtUsd(price);
-  $('sBand').textContent = fmtUsd(DATA.base[3] * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(DATA.base[3] * Math.exp(res.proj[N - 1] + res.valRmse));
+  $('sBand').textContent = fmtUsd(BASES[3] * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(BASES[3] * Math.exp(res.proj[N - 1] + res.valRmse));
   $('sGain').textContent = res.gain.toFixed(2);
-  const sh = res.centroid * totalDays / N;
-  $('sShift').textContent = (sh >= 0 ? '+' : '') + Math.round(sh) + ' d';
   $('sVal').textContent = '±' + Math.round((Math.exp(res.valRmse) - 1) * 100) + '%';
   $('sTime').textContent = 'retrained in ' + Math.round(ms) + ' ms';
-  $('foot').textContent = 'Data through ' + DATA.last + ' · Cycle 4 observed ' + Math.round(res.iLast / (N - 1) * 100) + '% · filter spans ±' + Math.round((res.taps >> 1) * totalDays / N) + ' days';
+  $('foot').textContent = 'Data through ' + new Date(lastDate()).toISOString().slice(0, 10) + (state.live ? ' (live)' : ' (embedded snapshot; live fetch unavailable)') +
+    ' · Cycle 4 observed ' + Math.round(res.iLast / (N - 1) * 100) + '% · filter spans ±' + Math.round((res.taps >> 1) * totalDays / N) + ' days';
 }
 
 let last = null, timer = null;
@@ -296,6 +337,7 @@ addEventListener('resize', () => last && draw(last));
   try { engine = await loadWasm(); $('badge').textContent = 'Rust · WebAssembly'; $('badge').classList.add('rust'); }
   catch (e) { $('badge').textContent = 'JavaScript engine (build fir.wasm for Rust)'; }
   sliders(); renderKnob(); compute(5000);
+  if (await fetchLatest()){ state.live = true; refreshSignals(); engine.setSig && engine.setSig(); compute(5000); }
 })();
 </script>
 </body>
