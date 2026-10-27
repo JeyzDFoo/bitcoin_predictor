@@ -1,0 +1,4 @@
+target/
+fir.wasm
+__pycache__/
+*.png

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC Cycle Filter</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --line:#272c36; --text:#e6e8ec; --mute:#8b93a1;
+    --accent:#4c8dff; --g1:#4a505c; --g2:#6a717e; --g3:#939aa8; --good:#3ecf8e;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f5f6f8; --panel:#fff; --line:#dfe2e8; --text:#1a1d23; --mute:#667085;
+      --g1:#c3c8d1; --g2:#a2a8b5; --g3:#7d8493; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px 16px 40px}
+  h1{font-size:20px;margin:0 0 2px;font-weight:650}
+  .sub{color:var(--mute);font-size:13px;margin-bottom:16px}
+  .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute);margin-left:8px;vertical-align:middle}
+  .badge.rust{color:var(--good);border-color:var(--good)}
+  .grid{display:grid;grid-template-columns:240px 1fr;gap:14px}
+  @media (max-width:820px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .knobbox{display:flex;flex-direction:column;align-items:center;gap:6px}
+  #knob{touch-action:none;cursor:grab;outline:none}
+  #knob:focus-visible .rim{stroke:var(--accent)}
+  .knobval{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+  .knoblab{color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+  .span{color:var(--mute);font-size:12px;text-align:center;min-height:18px}
+  .ctl{margin-top:18px}
+  .ctl label{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);margin-bottom:4px}
+  .ctl input{width:100%;accent-color:var(--accent)}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+  @media (max-width:820px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+  .stat .k{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em}
+  .stat .v{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums}
+  .stat .s{font-size:12px;color:var(--mute)}
+  canvas{width:100%;display:block}
+  #main{height:360px} #imp{height:150px;margin-top:10px}
+  .foot{color:var(--mute);font-size:12px;margin-top:12px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--mute);margin:0 0 6px}
+  .legend i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BTC Cycle Filter <span id="badge" class="badge">loading…</span></h1>
+  <div class="sub">A learned FIR filter maps each halving cycle onto the next. Turn the dial to change the number of taps; the filter retrains live.</div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">Projected at halving</div><div class="v" id="sPrice">–</div><div class="s" id="sBand">–</div></div>
+    <div class="stat"><div class="k">Filter gain</div><div class="v" id="sGain">–</div><div class="s">amplitude vs. prior cycle</div></div>
+    <div class="stat"><div class="k">Timing shift</div><div class="v" id="sShift">–</div><div class="s">vs. prior cycle</div></div>
+    <div class="stat"><div class="k">Out-of-sample error</div><div class="v" id="sVal">–</div><div class="s" id="sTime">–</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="knobbox">
+        <div class="knoblab">Taps</div>
+        <svg id="knob" width="170" height="170" viewBox="0 0 170 170" tabindex="0" role="slider" aria-label="Number of filter taps" aria-valuemin="3" aria-valuemax="101">
+          <circle class="rim" cx="85" cy="85" r="64" fill="none" stroke="var(--line)" stroke-width="2"/>
+          <path id="arcBg" fill="none" stroke="var(--line)" stroke-width="7" stroke-linecap="round"/>
+          <path id="arcFg" fill="none" stroke="var(--accent)" stroke-width="7" stroke-linecap="round"/>
+          <circle cx="85" cy="85" r="46" fill="var(--bg)" stroke="var(--line)"/>
+          <line id="pointer" x1="85" y1="85" x2="85" y2="48" stroke="var(--text)" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+        <div class="knobval" id="tapsVal">41</div>
+        <div class="span" id="tapsSpan"></div>
+      </div>
+      <div class="ctl"><label><span>Smoothness</span><span id="smV"></span></label>
+        <input id="smooth" type="range" min="-3" max="1" step="0.1" value="-1"></div>
+      <div class="ctl"><label><span>Edge penalty (L2)</span><span id="l2V"></span></label>
+        <input id="l2" type="range" min="-5" max="-1" step="0.1" value="-3"></div>
+      <div class="foot">Drag, scroll, or use ←/→ on the dial.</div>
+    </div>
+
+    <div class="panel">
+      <div class="legend">
+        <span><i style="background:var(--g1)"></i>Cycle 1</span>
+        <span><i style="background:var(--g2)"></i>Cycle 2</span>
+        <span><i style="background:var(--g3)"></i>Cycle 3</span>
+        <span><i style="background:var(--accent)"></i>Cycle 4 actual / projected</span>
+      </div>
+      <canvas id="main"></canvas>
+      <canvas id="imp"></canvas>
+      <div class="foot" id="foot"></div>
+    </div>
+  </div>
+  <div class="foot">Three cycles of history: a pattern-matching exercise, not a forecast or investment advice. Data: Coin Metrics open dataset (GitHub).</div>
+</div>
+
+<script>
+const DATA = __DATA__;
+const N = DATA.n, MAXT = 101;
+const SIG = new Float64Array(4 * N).fill(NaN);
+DATA.signals.forEach((s, k) => s.forEach((v, i) => { SIG[k * N + i] = v === null ? NaN : v; }));
+
+/* ---------- JS engine (same algorithm as src/lib.rs) ---------- */
+const JSEngine = (() => {
+  function convRow(x, taps, n, out){
+    const half = taps >> 1;
+    for (let j = 0; j < taps; j++){
+      let idx = n + half - j; idx = idx < 0 ? 0 : idx > N - 1 ? N - 1 : idx; out[j] = x[idx];
+    }
+  }
+  function train(pairs, taps, epochs, l2, smooth){
+    const rows = [], ys = [];
+    const tmp = new Float64Array(taps);
+    for (const [x, t] of pairs) for (let n = 0; n < N; n++){
+      if (Number.isNaN(t[n])) continue;
+      convRow(x, taps, n, tmp); rows.push(Float64Array.from(tmp)); ys.push(t[n]);
+    }
+    const m = ys.length, half = taps >> 1;
+    const A = new Float64Array(m * taps); rows.forEach((r, i) => A.set(r, i * taps));
+    const w = new Float64Array(taps);
+    for (let i = 0; i < taps; i++){ const r = half ? Math.abs(i - half) / half : 0; w[i] = l2 * (1 + 200 * r ** 4); }
+    const h = new Float64Array(taps); h[half] = 0.5; let b = 0;
+    const mh = new Float64Array(taps), vh = new Float64Array(taps), gh = new Float64Array(taps), err = new Float64Array(m);
+    let mb = 0, vb = 0;
+    const lr = 0.05, b1 = 0.9, b2 = 0.999, eps = 1e-8;
+    for (let t = 1; t <= epochs; t++){
+      for (let r = 0; r < m; r++){ let s = b; const o = r * taps; for (let j = 0; j < taps; j++) s += A[o + j] * h[j]; err[r] = s - ys[r]; }
+      for (let j = 0; j < taps; j++) gh[j] = w[j] * h[j];
+      const invm = 1 / m;
+      for (let r = 0; r < m; r++){ const e = err[r] * invm, o = r * taps; for (let j = 0; j < taps; j++) gh[j] += A[o + j] * e; }
+      for (let i = 0; i + 2 < taps; i++){ const d = smooth * (h[i] - 2 * h[i + 1] + h[i + 2]); gh[i] += d; gh[i + 1] -= 2 * d; gh[i + 2] += d; }
+      let gb = 0; for (let r = 0; r < m; r++) gb += err[r]; gb *= invm;
+      const c1 = 1 - b1 ** t, c2 = 1 - b2 ** t;
+      for (let j = 0; j < taps; j++){
+        mh[j] = b1 * mh[j] + (1 - b1) * gh[j]; vh[j] = b2 * vh[j] + (1 - b2) * gh[j] * gh[j];
+        h[j] -= lr * (mh[j] / c1) / (Math.sqrt(vh[j] / c2) + eps);
+      }
+      mb = b1 * mb + (1 - b1) * gb; vb = b2 * vb + (1 - b2) * gb * gb;
+      b -= lr * (mb / c1) / (Math.sqrt(vb / c2) + eps);
+    }
+    let se = 0;
+    for (let r = 0; r < m; r++){ let s = b; const o = r * taps; for (let j = 0; j < taps; j++) s += A[o + j] * h[j]; se += (s - ys[r]) ** 2; }
+    return { h, b, rmse: Math.sqrt(se / m) };
+  }
+  function apply(x, h, b){
+    const taps = h.length, out = new Float64Array(N), row = new Float64Array(taps);
+    for (let n = 0; n < N; n++){ convRow(x, taps, n, row); let s = b; for (let j = 0; j < taps; j++) s += row[j] * h[j]; out[n] = s; }
+    return out;
+  }
+  function run(taps, epochs, l2, smooth){
+    taps = Math.max(3, Math.min(MAXT, taps)); if (taps % 2 === 0) taps++;
+    const c = [0, 1, 2, 3].map(k => SIG.subarray(k * N, (k + 1) * N));
+    let iLast = 0; for (let i = N - 1; i >= 0; i--) if (!Number.isNaN(c[3][i])){ iLast = i; break; }
+    const v = train([[c[0], c[1]], [c[1], c[2]]], taps, epochs, l2, smooth);
+    const vp = apply(c[2], v.h, v.b); let se = 0, cnt = 0;
+    for (let i = 0; i < N; i++) if (!Number.isNaN(c[3][i])){ se += (vp[i] - c[3][i]) ** 2; cnt++; }
+    const f = train([[c[0], c[1]], [c[1], c[2]], [c[2], c[3]]], taps, epochs, l2, smooth);
+    const proj = apply(c[2], f.h, f.b), shift = c[3][iLast] - proj[iLast];
+    for (let i = 0; i < N; i++) proj[i] += shift;
+    let gain = 0; f.h.forEach(x => gain += x);
+    let cen = 0; f.h.forEach((x, i) => cen += (i - (taps >> 1)) * x); cen /= gain;
+    return { h: f.h, proj, valRmse: Math.sqrt(se / cnt), inRmse: f.rmse, gain, centroid: cen, iLast, taps };
+  }
+  return { run };
+})();
+
+/* ---------- Rust/WASM engine (loads fir.wasm if present) ---------- */
+async function loadWasm(){
+  const resp = await fetch('fir.wasm'); if (!resp.ok) throw new Error('no wasm');
+  const { instance } = await WebAssembly.instantiate(await resp.arrayBuffer(), {});
+  const x = instance.exports, mem = () => x.memory.buffer;
+  new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG);
+  return { run(taps, epochs, l2, smooth){
+    x.run(taps, epochs, l2, smooth);
+    const st = new Float64Array(mem(), x.stats_ptr(), 8), t = st[5];
+    return { h: Float64Array.from(new Float64Array(mem(), x.h_ptr(), t)),
+      proj: Float64Array.from(new Float64Array(mem(), x.proj_ptr(), N)),
+      valRmse: st[0], inRmse: st[1], gain: st[2], centroid: st[3], iLast: st[4], taps: t };
+  }};
+}
+
+/* ---------- UI ---------- */
+const $ = id => document.getElementById(id);
+let engine = JSEngine, state = { taps: 41 };
+const TMIN = 3, TMAX = 101;
+const fmtUsd = v => '$' + Math.round(v).toLocaleString('en-US');
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const totalDays = (new Date(DATA.halvings[4]) - new Date(DATA.halvings[3])) / 864e5;
+
+function setupCanvas(c){
+  const r = c.getBoundingClientRect(), d = devicePixelRatio || 1;
+  c.width = r.width * d; c.height = r.height * d;
+  const g = c.getContext('2d'); g.setTransform(d, 0, 0, d, 0, 0); return [g, r.width, r.height];
+}
+
+function draw(res){
+  const base = DATA.base[3];
+  // main chart
+  let [g, W, H] = setupCanvas($('main'));
+  const L = 46, R = 10, T = 8, B = 28, pw = W - L - R, ph = H - T - B;
+  const ymin = -1.5, ymax = 7.5;
+  const X = p => L + p * pw, Y = v => T + (1 - (v - ymin) / (ymax - ymin)) * ph;
+  g.clearRect(0, 0, W, H); g.font = '11px system-ui'; g.fillStyle = css('--mute'); g.strokeStyle = css('--line'); g.lineWidth = 1;
+  for (let v = -1; v <= 7; v += 1){ g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke(); g.textAlign = 'right'; g.fillText(v, L - 6, Y(v) + 4); }
+  for (let p = 0; p <= 1.001; p += 0.2){ g.textAlign = 'center'; g.fillText(p.toFixed(1), X(p), H - 10); }
+  g.textAlign = 'left'; g.fillText('log(price / price at halving)', L + 4, T + 12);
+  const cols = [css('--g1'), css('--g2'), css('--g3')];
+  for (let k = 0; k < 3; k++){
+    g.strokeStyle = cols[k]; g.lineWidth = 1.2; g.beginPath();
+    for (let i = 0; i < N; i++){ const p = i / (N - 1), v = SIG[k * N + i]; i ? g.lineTo(X(p), Y(v)) : g.moveTo(X(p), Y(v)); }
+    g.stroke();
+  }
+  const acc = css('--accent'), iL = res.iLast;
+  // band
+  g.fillStyle = acc + '22'; g.beginPath();
+  for (let i = iL; i < N; i++) g.lineTo(X(i / (N - 1)), Y(res.proj[i] + res.valRmse));
+  for (let i = N - 1; i >= iL; i--) g.lineTo(X(i / (N - 1)), Y(res.proj[i] - res.valRmse));
+  g.closePath(); g.fill();
+  g.strokeStyle = acc; g.lineWidth = 2.4; g.beginPath();
+  for (let i = 0; i <= iL; i++){ const p = i / (N - 1); i ? g.lineTo(X(p), Y(SIG[3 * N + i])) : g.moveTo(X(p), Y(SIG[3 * N + i])); }
+  g.stroke();
+  g.setLineDash([6, 4]); g.beginPath();
+  for (let i = iL; i < N; i++){ const p = i / (N - 1); i === iL ? g.moveTo(X(p), Y(res.proj[i])) : g.lineTo(X(p), Y(res.proj[i])); }
+  g.stroke(); g.setLineDash([]);
+
+  // impulse response
+  [g, W, H] = setupCanvas($('imp'));
+  const h = res.h, t = h.length, half = t >> 1, l2 = 46, r2 = 10;
+  let hm = 0.001; h.forEach(v => hm = Math.max(hm, Math.abs(v)));
+  const pw2 = W - l2 - r2, yz = H / 2 + 4, amp = H / 2 - 22;
+  g.clearRect(0, 0, W, H); g.fillStyle = css('--mute'); g.font = '11px system-ui'; g.textAlign = 'left';
+  g.fillText('impulse response (tap offset in days)', l2 + 4, 12);
+  g.strokeStyle = css('--line'); g.beginPath(); g.moveTo(l2, yz); g.lineTo(W - r2, yz); g.stroke();
+  const dpt = totalDays / N;
+  for (let i = 0; i < t; i++){
+    const x = l2 + (t === 1 ? 0.5 : i / (t - 1)) * pw2, y = yz - (h[i] / hm) * amp;
+    g.strokeStyle = acc; g.lineWidth = Math.max(1.5, Math.min(4, pw2 / t * 0.5)); g.beginPath(); g.moveTo(x, yz); g.lineTo(x, y); g.stroke();
+  }
+  g.fillStyle = css('--mute'); g.textAlign = 'center';
+  [-half, 0, half].forEach(o => { g.textAlign = o < 0 ? 'left' : o > 0 ? 'right' : 'center'; g.fillText(Math.round(o * dpt) + 'd', l2 + ((o + half) / (t - 1)) * pw2, H - 4); });
+}
+
+function readout(res, ms){
+  const price = DATA.base[3] * Math.exp(res.proj[N - 1]);
+  $('sPrice').textContent = fmtUsd(price);
+  $('sBand').textContent = fmtUsd(DATA.base[3] * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(DATA.base[3] * Math.exp(res.proj[N - 1] + res.valRmse));
+  $('sGain').textContent = res.gain.toFixed(2);
+  const sh = res.centroid * totalDays / N;
+  $('sShift').textContent = (sh >= 0 ? '+' : '') + Math.round(sh) + ' d';
+  $('sVal').textContent = '±' + Math.round((Math.exp(res.valRmse) - 1) * 100) + '%';
+  $('sTime').textContent = 'retrained in ' + Math.round(ms) + ' ms';
+  $('foot').textContent = 'Data through ' + DATA.last + ' · Cycle 4 observed ' + Math.round(res.iLast / (N - 1) * 100) + '% · filter spans ±' + Math.round((res.taps >> 1) * totalDays / N) + ' days';
+}
+
+let last = null, timer = null;
+function compute(epochs){
+  const t0 = performance.now();
+  last = engine.run(state.taps, epochs, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value));
+  readout(last, performance.now() - t0); draw(last);
+}
+function schedule(){ clearTimeout(timer); compute(900); timer = setTimeout(() => compute(5000), 220); }
+
+/* knob */
+const A0 = -135, A1 = 135;
+function polar(a, r){ const t = (a - 90) * Math.PI / 180; return [85 + r * Math.cos(t), 85 + r * Math.sin(t)]; }
+function arc(a0, a1){ const [x0, y0] = polar(a0, 64), [x1, y1] = polar(a1, 64); return `M${x0} ${y0} A64 64 0 ${a1 - a0 > 180 ? 1 : 0} 1 ${x1} ${y1}`; }
+function renderKnob(){
+  const f = (state.taps - TMIN) / (TMAX - TMIN), a = A0 + f * (A1 - A0);
+  $('arcBg').setAttribute('d', arc(A0, A1)); $('arcFg').setAttribute('d', arc(A0, Math.max(a, A0 + 0.01)));
+  const [px, py] = polar(a, 38); $('pointer').setAttribute('x2', px); $('pointer').setAttribute('y2', py);
+  $('tapsVal').textContent = state.taps; $('knob').setAttribute('aria-valuenow', state.taps);
+  $('tapsSpan').textContent = '±' + Math.round((state.taps >> 1) * totalDays / N) + ' day window';
+}
+function setTaps(v){ v = Math.round((Math.max(TMIN, Math.min(TMAX, v)) - 1) / 2) * 2 + 1; if (v !== state.taps){ state.taps = v; renderKnob(); schedule(); } }
+(() => {
+  const k = $('knob'); let drag = false;
+  const fromEvent = e => {
+    const r = k.getBoundingClientRect(), dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+    let a = Math.atan2(dx, -dy) * 180 / Math.PI; a = Math.max(A0, Math.min(A1, a));
+    setTaps(TMIN + (a - A0) / (A1 - A0) * (TMAX - TMIN));
+  };
+  k.addEventListener('pointerdown', e => { drag = true; k.setPointerCapture(e.pointerId); k.style.cursor = 'grabbing'; fromEvent(e); });
+  k.addEventListener('pointermove', e => { if (drag) fromEvent(e); });
+  k.addEventListener('pointerup', () => { drag = false; k.style.cursor = 'grab'; });
+  k.addEventListener('wheel', e => { e.preventDefault(); setTaps(state.taps + (e.deltaY < 0 ? 2 : -2)); }, { passive: false });
+  k.addEventListener('keydown', e => {
+    const m = { ArrowRight: 2, ArrowUp: 2, ArrowLeft: -2, ArrowDown: -2, PageUp: 10, PageDown: -10 }[e.key];
+    if (m){ e.preventDefault(); setTaps(state.taps + m); }
+    if (e.key === 'Home'){ e.preventDefault(); setTaps(TMIN); } if (e.key === 'End'){ e.preventDefault(); setTaps(TMAX); }
+  });
+})();
+function sliders(){ $('smV').textContent = (10 ** $('smooth').value).toPrecision(2); $('l2V').textContent = (10 ** $('l2').value).toExponential(0); }
+['smooth', 'l2'].forEach(id => $(id).addEventListener('input', () => { sliders(); schedule(); }));
+addEventListener('resize', () => last && draw(last));
+
+(async () => {
+  try { engine = await loadWasm(); $('badge').textContent = 'Rust · WebAssembly'; $('badge').classList.add('rust'); }
+  catch (e) { $('badge').textContent = 'JavaScript engine (build fir.wasm for Rust)'; }
+  sliders(); renderKnob(); compute(5000);
+})();
+</script>
+</body>
+</html>
