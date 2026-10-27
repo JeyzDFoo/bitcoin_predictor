@@ -82,13 +82,15 @@
       <div class="legend">
         <span><i style="background:var(--g3)"></i>Last 30 days (actual)</span>
         <span><i style="background:var(--accent)"></i>Next 60 days (projected)</span>
+        <span><i style="background:var(--accent);opacity:.45;height:8px"></i>50% band</span>
+        <span><i style="background:var(--accent);opacity:.18;height:8px"></i>90% band</span>
       </div>
       <canvas id="main"></canvas>
       <canvas id="imp"></canvas>
       <div class="foot" id="foot"></div>
     </div>
   </div>
-  <div class="foot">Three cycles of history: a pattern-matching exercise, not a forecast or investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare when online.</div>
+  <div class="foot">Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare when online.</div>
 </div>
 
 <script>
@@ -229,19 +231,29 @@ const projLog = (res, tMs) => {
   return res.proj[i] + f * (res.proj[i + 1] - res.proj[i]);
 };
 const dfmt = t => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+function bandQ(taps, h){
+  const B = DATA.bands, keys = Object.keys(B.taps).map(Number);
+  const k = keys.reduce((a, c) => Math.abs(c - taps) < Math.abs(a - taps) ? c : a), T = B.taps[k];
+  const x = Math.min(Math.max(h, 0), 60) / 5, i = Math.min(Math.floor(x), 11), f = x - i, out = {};
+  for (const q of ['q05', 'q25', 'q75', 'q95']) out[q] = T[q][i] + f * (T[q][i + 1] - T[q][i]);
+  return out;
+}
 function zoomSeries(res){
   const tL = lastDate(), tA = tL - 30 * DAY, tB = tL + 60 * DAY, base = BASES[3];
   const off = Math.log(PX.p[PX.p.length - 1] / base) - projLog(res, tL);
   const act = [], pr = [];
   for (let t = tA; t <= tL; t += DAY) act.push([t, PX.p[Math.round((t - PX.t0) / DAY)]]);
-  for (let t = tL; t <= tB; t += DAY) pr.push([t, base * Math.exp(projLog(res, t) + off)]);
+  for (let t = tL; t <= tB; t += DAY){
+    const v = base * Math.exp(projLog(res, t) + off), q = bandQ(res.taps, (t - tL) / DAY);
+    pr.push([t, v, v * Math.exp(q.q05), v * Math.exp(q.q25), v * Math.exp(q.q75), v * Math.exp(q.q95)]);
+  }
   return { tL, tA, tB, act, pr };
 }
 function draw(res){
   const acc = css('--accent'), { tL, tA, tB, act, pr } = zoomSeries(res);
   let [g, W, H] = setupCanvas($('main'));
   const L = 54, R = 54, T = 10, B = 28, pw = W - L - R, ph = H - T - B;
-  let lo = Infinity, hi = -Infinity; [...act, ...pr].forEach(([, v]) => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+  let lo = Infinity, hi = -Infinity; act.forEach(([, v]) => { lo = Math.min(lo, v); hi = Math.max(hi, v); }); pr.forEach(r => { lo = Math.min(lo, r[2]); hi = Math.max(hi, r[5]); });
   const pad = (hi - lo) * 0.1 || hi * 0.05; lo -= pad; hi += pad;
   const raw = (hi - lo) / 5, mag = 10 ** Math.floor(Math.log10(raw)), step = [1, 2, 2.5, 5, 10].find(m => m * mag >= raw) * mag;
   const X = t => L + (t - tA) / (tB - tA) * pw, Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
@@ -257,7 +269,10 @@ function draw(res){
   g.strokeStyle = css('--mute'); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(tL), T); g.lineTo(X(tL), T + ph); g.stroke(); g.setLineDash([]);
   g.fillStyle = css('--mute'); g.textAlign = 'right'; g.fillText('last data ' + dfmt(tL), X(tL) - 6, T + 12);
   g.strokeStyle = css('--g3'); g.lineWidth = 2.4; g.beginPath(); act.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke();
-  g.strokeStyle = acc; g.setLineDash([6, 4]); g.beginPath(); pr.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke(); g.setLineDash([]);
+  const poly = (iLo, iHi, a) => { g.fillStyle = acc + a; g.beginPath(); pr.forEach((r, i) => i ? g.lineTo(X(r[0]), Y(r[iHi])) : g.moveTo(X(r[0]), Y(r[iHi])));
+    for (let i = pr.length - 1; i >= 0; i--) g.lineTo(X(pr[i][0]), Y(pr[i][iLo])); g.closePath(); g.fill(); };
+  poly(2, 5, '22'); poly(3, 4, '40');
+  g.strokeStyle = acc; g.lineWidth = 2.4; g.setLineDash([6, 4]); g.beginPath(); pr.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke(); g.setLineDash([]);
   const [te, ve] = pr[pr.length - 1]; g.fillStyle = acc; g.beginPath(); g.arc(X(te), Y(ve), 4, 0, 7); g.fill();
   g.textAlign = 'left'; g.fillText('$' + Math.round(ve / 100) / 10 + 'k', X(te) + 7, Y(ve) + 4);
 
@@ -279,9 +294,9 @@ function draw(res){
 }
 
 function readout(res, ms){
-  const { act, pr } = zoomSeries(res), p0 = act[act.length - 1][1], p60 = pr[pr.length - 1][1];
+  const { act, pr } = zoomSeries(res), p0 = act[act.length - 1][1], end = pr[pr.length - 1], p60 = end[1];
   $('s60').textContent = fmtUsd(p60);
-  $('s60b').textContent = (p60 >= p0 ? '+' : '') + ((p60 / p0 - 1) * 100).toFixed(1) + '% from ' + fmtUsd(p0);
+  $('s60b').textContent = (p60 >= p0 ? '+' : '') + ((p60 / p0 - 1) * 100).toFixed(1) + '% · 50%: ' + fmtUsd(end[3]) + '–' + fmtUsd(end[4]) + ' · 90%: ' + fmtUsd(end[2]) + '–' + fmtUsd(end[5]);
   const price = BASES[3] * Math.exp(res.proj[N - 1]);
   $('sPrice').textContent = fmtUsd(price);
   $('sBand').textContent = fmtUsd(BASES[3] * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(BASES[3] * Math.exp(res.proj[N - 1] + res.valRmse));
