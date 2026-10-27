@@ -7,7 +7,7 @@
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --line:#272c36; --text:#e6e8ec; --mute:#8b93a1;
-    --accent:#4c8dff; --g1:#4a505c; --g2:#6a717e; --g3:#939aa8; --good:#3ecf8e;
+    --accent:#4c8dff; --g1:#4a505c; --g2:#6a717e; --g3:#939aa8; --good:#3ecf8e; --bad:#e5484d;
   }
   @media (prefers-color-scheme: light){
     :root{ --bg:#f5f6f8; --panel:#fff; --line:#dfe2e8; --text:#1a1d23; --mute:#667085;
@@ -32,7 +32,7 @@
   .ctl{margin-top:18px}
   .ctl label{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);margin-bottom:4px}
   .ctl input{width:100%;accent-color:var(--accent)}
-  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+  .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
   @media (max-width:820px){.stats{grid-template-columns:repeat(2,1fr)}}
   .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
   .stat .k{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em}
@@ -47,6 +47,7 @@
   .scrub select{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 6px;font:inherit;font-size:13px}
   .asof{font-weight:650;font-variant-numeric:tabular-nums;min-width:110px;text-align:right;font-size:14px}
   #strip{height:52px;margin:2px 0 8px}
+  #trend{height:150px;margin-top:10px}
   .foot{color:var(--mute);font-size:12px;margin-top:12px}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--mute);margin:0 0 6px}
   .legend i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
@@ -58,6 +59,7 @@
   <div class="sub">A learned FIR filter maps each halving cycle onto the next. Turn the dial to change the number of taps; the filter retrains live.</div>
 
   <div class="stats">
+    <div class="stat"><div class="k">90-day trend</div><div class="v" id="sTrend">–</div><div class="s" id="sTrendB">–</div><div class="s" id="sTrendC"></div></div>
     <div class="stat"><div class="k">Next 60 days</div><div class="v" id="s60">–</div><div class="s" id="s60b">–</div><div class="s" id="s60c"></div></div>
     <div class="stat"><div class="k">Projected at halving</div><div class="v" id="sPrice">–</div><div class="s" id="sBand">–</div></div>
     <div class="stat"><div class="k">Filter gain</div><div class="v" id="sGain">–</div><div class="s">amplitude vs. prior cycle</div></div>
@@ -104,6 +106,8 @@
         <span><i style="background:var(--accent);opacity:.18;height:8px"></i>90% band</span>
       </div>
       <canvas id="main"></canvas>
+      <canvas id="trend"></canvas>
+      <div class="foot" id="trendNote"></div>
       <canvas id="imp"></canvas>
       <div class="foot" id="foot"></div>
     </div>
@@ -326,6 +330,12 @@ function readout(res, ms){
   $('s60c').textContent = real.length > 1 ? 'actual by ' + dfmt(rl[0]) + ': ' + fmtUsd(rl[1]) + ' (' + (rl[1] >= p0 ? '+' : '') + ((rl[1] / p0 - 1) * 100).toFixed(1) + '%)' : '';
   $('sPrice').textContent = fmtUsd(base * Math.exp(res.proj[N - 1]));
   $('sBand').textContent = fmtUsd(base * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(base * Math.exp(res.proj[N - 1] + res.valRmse));
+  const tr = trendSignal(res), TT = trendTable(res.taps), flat = Math.abs(tr.pred) < 0.03, up = tr.pred >= 0;
+  $('sTrend').textContent = flat ? '◆ Flat ' + pct(tr.pred) : (up ? '▲ Up ' : '▼ Down ') + pct(tr.pred);
+  $('sTrend').style.color = flat ? 'var(--mute)' : up ? 'var(--good)' : 'var(--bad)';
+  $('sTrendB').textContent = 'track record: direction right ' + Math.round(TT.hit * 100) + '% (always-up ' + Math.round(Math.max(TT.up, 1 - TT.up) * 100) + '%)';
+  $('sTrendC').textContent = tr.actual === null ? 'outcome not known yet' : 'actual: ' + (tr.actual >= 0 ? '▲ ' : '▼ ') + pct(tr.actual) + (Math.sign(tr.actual) === Math.sign(tr.pred) ? '  ✓ right' : '  ✗ wrong');
+  $('sTrendC').style.color = tr.actual === null ? '' : Math.sign(tr.actual) === Math.sign(tr.pred) ? 'var(--good)' : 'var(--bad)';
   $('sGain').textContent = res.gain.toFixed(2);
   $('sVal').textContent = '±' + Math.round((Math.exp(res.valRmse) - 1) * 100) + '%';
   $('sTime').textContent = 'retrained in ' + Math.round(ms) + ' ms';
@@ -341,10 +351,38 @@ function compute(epochs){
   const t0 = performance.now();
   last = engine.run(state.taps, epochs, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value), state.cur);
   last.cur = state.cur;
-  readout(last, performance.now() - t0); draw(last); drawStrip();
+  readout(last, performance.now() - t0); draw(last); drawStrip(); drawTrend(last);
 }
 function schedule(){ clearTimeout(timer); compute(900); timer = setTimeout(() => compute(5000), 220); }
 
+const trendTable = taps => { const T = DATA.trend.taps, ks = Object.keys(T).map(Number); return T[ks.reduce((a, c) => Math.abs(c - taps) < Math.abs(a - taps) ? c : a)]; };
+const pct = v => (v >= 0 ? '+' : '') + ((Math.exp(v) - 1) * 100).toFixed(0) + '%';
+function trendSignal(res){
+  const t = state.asOf, e = HAL[res.cur + 1], t1 = Math.min(t + 90 * DAY, e);
+  const px = ms => PX.p[Math.round((ms - PX.t0) / DAY)];
+  return { pred: projLog(res, t1) - projLog(res, t), actual: t + 90 * DAY <= lastDate() ? Math.log(px(t + 90 * DAY) / px(t)) : null };
+}
+function drawTrend(res){
+  const T = trendTable(state.taps), sig = trendSignal(res), [g, W, H] = setupCanvas($('trend'));
+  const L = 46, R = 10, Tp = 8, B = 22, pw = W - L - R, ph = H - Tp - B;
+  const x0 = T.d[0] - 3.5 * DAY, x1 = lastDate() + 3.5 * DAY;
+  let m = 0.3; T.p.concat(T.r, [sig.pred]).forEach(v => m = Math.max(m, Math.min(1.2, Math.abs(v)))); m *= 1.08;
+  const X = t => L + (t - x0) / (x1 - x0) * pw, Y = v => Tp + (1 - (Math.max(-m, Math.min(m, v)) + m) / (2 * m)) * ph;
+  const good = css('--good'), bad = css('--bad'), acc = css('--accent');
+  g.clearRect(0, 0, W, H); g.font = '11px system-ui';
+  T.d.forEach((d, i) => { g.fillStyle = (Math.sign(T.p[i]) === Math.sign(T.r[i]) ? good + '2e' : bad + '38'); g.fillRect(X(d - 3.5 * DAY), Tp, X(d + 3.5 * DAY) - X(d - 3.5 * DAY) + 0.6, ph); });
+  g.strokeStyle = css('--line'); g.fillStyle = css('--mute'); g.textAlign = 'right'; g.lineWidth = 1;
+  [-0.5, 0, 0.5, 1].filter(v => Math.abs(v) <= m).forEach(v => { g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke(); g.fillText(pct(v), L - 6, Y(v) + 4); });
+  g.textAlign = 'center';
+  for (let y = 2021; y <= 2026; y++) for (const mo of [0, 6]){ const t = Date.UTC(y, mo, 1); if (t > x0 && t < x1) g.fillText((mo ? 'Jul ' : 'Jan ') + String(y).slice(2), X(t), H - 6); }
+  const line = (arr, col, w) => { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); T.d.forEach((d, i) => (i && d - T.d[i - 1] < 10 * DAY) ? g.lineTo(X(d), Y(arr[i])) : g.moveTo(X(d), Y(arr[i]))); g.stroke(); };
+  line(T.r, css('--g3'), 2); line(T.p, acc, 2);
+  const xa = X(state.asOf); g.strokeStyle = css('--text'); g.globalAlpha = 0.5; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(xa, Tp); g.lineTo(xa, Tp + ph); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+  g.strokeStyle = acc; g.lineWidth = 2; g.fillStyle = css('--bg'); g.beginPath(); g.arc(xa, Y(sig.pred), 5, 0, 7); g.fill(); g.stroke();
+  if (sig.actual !== null){ g.fillStyle = css('--g3'); g.beginPath(); g.arc(xa, Y(sig.actual), 4, 0, 7); g.fill(); }
+  $('trendNote').textContent = '90-day return by as-of date: predicted (blue) vs actual (grey). Green columns = direction right, red = wrong. Walk-forward, direction right ' +
+    Math.round(T.hit * 100) + '% of ' + T.n + ' weekly dates (always-up: ' + Math.round(Math.max(T.up, 1 - T.up) * 100) + '%). Ring = the selected date\'s prediction.';
+}
 function drawStrip(){
   const [g, W, H] = setupCanvas($('strip')), a = HAL[2], b = lastDate(), L = 4, R = 4, T = 4, B = 4, pw = W - L - R, ph = H - T - B;
   const i0 = Math.round((a - PX.t0) / DAY), n = PX.p.length - i0;
@@ -416,7 +454,7 @@ function setTaps(v){ v = Math.round((Math.max(TMIN, Math.min(TMAX, v)) - 1) / 2)
 })();
 function sliders(){ $('smV').textContent = (10 ** $('smooth').value).toPrecision(2); $('l2V').textContent = (10 ** $('l2').value).toExponential(0); }
 ['smooth', 'l2'].forEach(id => $(id).addEventListener('input', () => { sliders(); schedule(); }));
-addEventListener('resize', () => { if (last){ draw(last); drawStrip(); } });
+addEventListener('resize', () => { if (last){ draw(last); drawStrip(); drawTrend(last); } });
 
 (async () => {
   try { engine = await loadWasm(); $('badge').textContent = 'Rust · WebAssembly'; $('badge').classList.add('rust'); }
