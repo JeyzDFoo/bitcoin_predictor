@@ -44,6 +44,7 @@
   .scrub button{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font:inherit;font-size:13px;cursor:pointer}
   .scrub button:hover{border-color:var(--accent)}
   .scrub input{flex:1;accent-color:var(--accent)}
+  .scrub select{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 6px;font:inherit;font-size:13px}
   .asof{font-weight:650;font-variant-numeric:tabular-nums;min-width:110px;text-align:right;font-size:14px}
   #strip{height:52px;margin:2px 0 8px}
   .foot{color:var(--mute);font-size:12px;margin-top:12px}
@@ -91,6 +92,7 @@
         <input id="asof" type="range" min="0" max="1" step="1" value="1" aria-label="As-of date">
         <button id="bFwd" title="Forward 7 days">7d ▶</button>
         <button id="bNow">Now</button>
+        <select id="speed" title="Playback speed"><option value="0.25">0.25×</option><option value="0.5" selected>0.5×</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select>
         <span class="asof" id="asofLab"></span>
       </div>
       <canvas id="strip"></canvas>
@@ -376,8 +378,9 @@ $('bPlay').onclick = async () => {
   playing = true; $('bPlay').textContent = '❚❚ Pause';
   if (state.asOf >= lastDate() - 2 * DAY) goto(MIN_ASOF, 500);
   while (playing && state.asOf < lastDate()){
+    const t0 = performance.now();
     goto(state.asOf + 3 * DAY, 500);
-    await new Promise(r => requestAnimationFrame(r));
+    await new Promise(r => setTimeout(r, Math.max(16, 200 / parseFloat($('speed').value) - (performance.now() - t0))));
   }
   const done = playing; playing = false; $('bPlay').textContent = '▶ Play'; compute(5000);
 };
