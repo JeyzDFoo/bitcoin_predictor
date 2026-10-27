@@ -11,7 +11,7 @@ fn main() {
             sig[k * btc_fir::N + i] = v.parse().unwrap();
         }
     }
-    btc_fir::run(taps, 5000, 1e-3, 1e-1);
+    btc_fir::run(taps, 5000, 1e-3, 1e-1, 3);
     let st = unsafe { std::slice::from_raw_parts(btc_fir::stats_ptr(), 8) };
     let proj = unsafe { std::slice::from_raw_parts(btc_fir::proj_ptr(), btc_fir::N) };
     println!("val_rmse={:.4} in_rmse={:.4} gain={:.3} centroid_taps={:.3} i_last={}", st[0], st[1], st[2], st[3], st[4]);

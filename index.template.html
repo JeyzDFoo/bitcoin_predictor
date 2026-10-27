@@ -40,6 +40,12 @@
   .stat .s{font-size:12px;color:var(--mute)}
   canvas{width:100%;display:block}
   #main{height:360px} #imp{height:150px;margin-top:10px}
+  .scrub{display:flex;align-items:center;gap:8px;margin:0 0 6px}
+  .scrub button{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font:inherit;font-size:13px;cursor:pointer}
+  .scrub button:hover{border-color:var(--accent)}
+  .scrub input{flex:1;accent-color:var(--accent)}
+  .asof{font-weight:650;font-variant-numeric:tabular-nums;min-width:110px;text-align:right;font-size:14px}
+  #strip{height:52px;margin:2px 0 8px}
   .foot{color:var(--mute);font-size:12px;margin-top:12px}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--mute);margin:0 0 6px}
   .legend i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
@@ -51,7 +57,7 @@
   <div class="sub">A learned FIR filter maps each halving cycle onto the next. Turn the dial to change the number of taps; the filter retrains live.</div>
 
   <div class="stats">
-    <div class="stat"><div class="k">Next 60 days</div><div class="v" id="s60">–</div><div class="s" id="s60b">–</div></div>
+    <div class="stat"><div class="k">Next 60 days</div><div class="v" id="s60">–</div><div class="s" id="s60b">–</div><div class="s" id="s60c"></div></div>
     <div class="stat"><div class="k">Projected at halving</div><div class="v" id="sPrice">–</div><div class="s" id="sBand">–</div></div>
     <div class="stat"><div class="k">Filter gain</div><div class="v" id="sGain">–</div><div class="s">amplitude vs. prior cycle</div></div>
     <div class="stat"><div class="k">Cycle error (out-of-sample)</div><div class="v" id="sVal">–</div><div class="s" id="sTime">–</div></div>
@@ -79,8 +85,18 @@
     </div>
 
     <div class="panel">
+      <div class="scrub">
+        <button id="bPlay" title="Replay from the earliest date">▶ Play</button>
+        <button id="bBack" title="Back 7 days">◀ 7d</button>
+        <input id="asof" type="range" min="0" max="1" step="1" value="1" aria-label="As-of date">
+        <button id="bFwd" title="Forward 7 days">7d ▶</button>
+        <button id="bNow">Now</button>
+        <span class="asof" id="asofLab"></span>
+      </div>
+      <canvas id="strip"></canvas>
       <div class="legend">
-        <span><i style="background:var(--g3)"></i>Last 30 days (actual)</span>
+        <span><i style="background:var(--g3)"></i>Last 30 days (known)</span>
+        <span><i style="background:var(--text);opacity:.5"></i>What actually happened</span>
         <span><i style="background:var(--accent)"></i>Next 60 days (projected)</span>
         <span><i style="background:var(--accent);opacity:.45;height:8px"></i>50% band</span>
         <span><i style="background:var(--accent);opacity:.18;height:8px"></i>90% band</span>
@@ -90,7 +106,7 @@
       <div class="foot" id="foot"></div>
     </div>
   </div>
-  <div class="foot">Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare when online.</div>
+  <div class="foot">Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), calibrated on this same history, not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare when online.</div>
 </div>
 
 <script>
@@ -101,11 +117,12 @@ const DAY = 864e5, HAL = DATA.halvings.map(d => Date.parse(d + 'T00:00:00Z'));
 let PX = { t0: Date.parse(DATA.daily.start + 'T00:00:00Z'), p: Float64Array.from(DATA.daily.p) };
 let BASES = DATA.base.slice();
 const lastDate = () => PX.t0 + (PX.p.length - 1) * DAY;
-function refreshSignals(){
+function refreshSignals(cutoff = lastDate()){
   SIG.fill(NaN);
   for (let k = 0; k < 4; k++){
     const s = HAL[k], e = HAL[k + 1];
-    const i0 = Math.round((s - PX.t0) / DAY), i1 = Math.min(Math.round((e - PX.t0) / DAY), PX.p.length - 1);
+    const i0 = Math.round((s - PX.t0) / DAY), i1 = Math.min(Math.round((e - PX.t0) / DAY), PX.p.length - 1, Math.round((cutoff - PX.t0) / DAY));
+    if (i1 <= i0) continue;
     const p0 = PX.p[i0]; BASES[k] = p0;
     const ph = [], lv = [];
     for (let i = i0; i <= i1; i++){ ph.push((PX.t0 + i * DAY - s) / (e - s)); lv.push(Math.log(PX.p[i] / p0)); }
@@ -118,7 +135,6 @@ function refreshSignals(){
     }
   }
 }
-refreshSignals();
 async function fetchLatest(){
   try {
     const r = await fetch('https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=400');
@@ -180,19 +196,22 @@ const JSEngine = (() => {
     for (let n = 0; n < N; n++){ convRow(x, taps, n, row); let s = b; for (let j = 0; j < taps; j++) s += row[j] * h[j]; out[n] = s; }
     return out;
   }
-  function run(taps, epochs, l2, smooth){
+  function run(taps, epochs, l2, smooth, cur){
     taps = Math.max(3, Math.min(MAXT, taps)); if (taps % 2 === 0) taps++;
+    cur = Math.max(2, Math.min(3, cur));
     const c = [0, 1, 2, 3].map(k => SIG.subarray(k * N, (k + 1) * N));
-    let iLast = 0; for (let i = N - 1; i >= 0; i--) if (!Number.isNaN(c[3][i])){ iLast = i; break; }
-    const v = train([[c[0], c[1]], [c[1], c[2]]], taps, epochs, l2, smooth);
-    const vp = apply(c[2], v.h, v.b); let se = 0, cnt = 0;
-    for (let i = 0; i < N; i++) if (!Number.isNaN(c[3][i])){ se += (vp[i] - c[3][i]) ** 2; cnt++; }
-    const f = train([[c[0], c[1]], [c[1], c[2]], [c[2], c[3]]], taps, epochs, l2, smooth);
-    const proj = apply(c[2], f.h, f.b), shift = c[3][iLast] - proj[iLast];
+    let iLast = 0; for (let i = N - 1; i >= 0; i--) if (!Number.isNaN(c[cur][i])){ iLast = i; break; }
+    const vpairs = [], fpairs = [];
+    for (let j = 0; j < cur; j++){ fpairs.push([c[j], c[j + 1]]); if (j < cur - 1) vpairs.push([c[j], c[j + 1]]); }
+    const v = train(vpairs, taps, epochs, l2, smooth);
+    const vp = apply(c[cur - 1], v.h, v.b); let se = 0, cnt = 0;
+    for (let i = 0; i < N; i++) if (!Number.isNaN(c[cur][i])){ se += (vp[i] - c[cur][i]) ** 2; cnt++; }
+    const f = train(fpairs, taps, epochs, l2, smooth);
+    const proj = apply(c[cur - 1], f.h, f.b), shift = c[cur][iLast] - proj[iLast];
     for (let i = 0; i < N; i++) proj[i] += shift;
     let gain = 0; f.h.forEach(x => gain += x);
     let cen = 0; f.h.forEach((x, i) => cen += (i - (taps >> 1)) * x); cen /= gain;
-    return { h: f.h, proj, valRmse: Math.sqrt(se / cnt), inRmse: f.rmse, gain, centroid: cen, iLast, taps };
+    return { h: f.h, proj, valRmse: cnt ? Math.sqrt(se / cnt) : 0, inRmse: f.rmse, gain, centroid: cen, iLast, taps };
   }
   return { run };
 })();
@@ -203,8 +222,8 @@ async function loadWasm(){
   const { instance } = await WebAssembly.instantiate(await resp.arrayBuffer(), {});
   const x = instance.exports, mem = () => x.memory.buffer;
   new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG);
-  return { setSig(){ new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG); }, run(taps, epochs, l2, smooth){
-    x.run(taps, epochs, l2, smooth);
+  return { setSig(){ new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG); }, run(taps, epochs, l2, smooth, cur){
+    x.run(taps, epochs, l2, smooth, cur);
     const st = new Float64Array(mem(), x.stats_ptr(), 8), t = st[5];
     return { h: Float64Array.from(new Float64Array(mem(), x.h_ptr(), t)),
       proj: Float64Array.from(new Float64Array(mem(), x.proj_ptr(), N)),
@@ -214,11 +233,12 @@ async function loadWasm(){
 
 /* ---------- UI ---------- */
 const $ = id => document.getElementById(id);
-let engine = JSEngine, state = { taps: 41 };
+let engine = JSEngine, state = { taps: 41, asOf: lastDate(), cur: 3 };
 const TMIN = 3, TMAX = 101;
 const fmtUsd = v => '$' + Math.round(v).toLocaleString('en-US');
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-const totalDays = (new Date(DATA.halvings[4]) - new Date(DATA.halvings[3])) / 864e5;
+const td = () => (HAL[state.cur + 1] - HAL[state.cur]) / DAY;
+const MIN_ASOF = HAL[2] + 120 * DAY;
 
 function setupCanvas(c){
   const r = c.getBoundingClientRect(), d = devicePixelRatio || 1;
@@ -227,7 +247,7 @@ function setupCanvas(c){
 }
 
 const projLog = (res, tMs) => {
-  const g = (tMs - HAL[3]) / (HAL[4] - HAL[3]) * (N - 1), i = Math.max(0, Math.min(N - 2, Math.floor(g))), f = g - i;
+  const k = res.cur, g = (tMs - HAL[k]) / (HAL[k + 1] - HAL[k]) * (N - 1), i = Math.max(0, Math.min(N - 2, Math.floor(g))), f = g - i;
   return res.proj[i] + f * (res.proj[i + 1] - res.proj[i]);
 };
 const dfmt = t => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -239,21 +259,23 @@ function bandQ(taps, h){
   return out;
 }
 function zoomSeries(res){
-  const tL = lastDate(), tA = tL - 30 * DAY, tB = tL + 60 * DAY, base = BASES[3];
-  const off = Math.log(PX.p[PX.p.length - 1] / base) - projLog(res, tL);
-  const act = [], pr = [];
-  for (let t = tA; t <= tL; t += DAY) act.push([t, PX.p[Math.round((t - PX.t0) / DAY)]]);
+  const tL = state.asOf, tA = tL - 30 * DAY, tB = tL + 60 * DAY, base = BASES[res.cur];
+  const px = t => PX.p[Math.round((t - PX.t0) / DAY)];
+  const off = Math.log(px(tL) / base) - projLog(res, tL);
+  const act = [], pr = [], real = [];
+  for (let t = tA; t <= tL; t += DAY) act.push([t, px(t)]);
   for (let t = tL; t <= tB; t += DAY){
     const v = base * Math.exp(projLog(res, t) + off), q = bandQ(res.taps, (t - tL) / DAY);
     pr.push([t, v, v * Math.exp(q.q05), v * Math.exp(q.q25), v * Math.exp(q.q75), v * Math.exp(q.q95)]);
+    if (t <= lastDate()) real.push([t, px(t)]);
   }
-  return { tL, tA, tB, act, pr };
+  return { tL, tA, tB, act, pr, real };
 }
 function draw(res){
-  const acc = css('--accent'), { tL, tA, tB, act, pr } = zoomSeries(res);
+  const acc = css('--accent'), { tL, tA, tB, act, pr, real } = zoomSeries(res);
   let [g, W, H] = setupCanvas($('main'));
   const L = 54, R = 54, T = 10, B = 28, pw = W - L - R, ph = H - T - B;
-  let lo = Infinity, hi = -Infinity; act.forEach(([, v]) => { lo = Math.min(lo, v); hi = Math.max(hi, v); }); pr.forEach(r => { lo = Math.min(lo, r[2]); hi = Math.max(hi, r[5]); });
+  let lo = Infinity, hi = -Infinity; act.forEach(([, v]) => { lo = Math.min(lo, v); hi = Math.max(hi, v); }); pr.forEach(r => { lo = Math.min(lo, r[2]); hi = Math.max(hi, r[5]); }); real.forEach(([, v]) => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
   const pad = (hi - lo) * 0.1 || hi * 0.05; lo -= pad; hi += pad;
   const raw = (hi - lo) / 5, mag = 10 ** Math.floor(Math.log10(raw)), step = [1, 2, 2.5, 5, 10].find(m => m * mag >= raw) * mag;
   const X = t => L + (t - tA) / (tB - tA) * pw, Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
@@ -267,12 +289,13 @@ function draw(res){
   g.textAlign = 'center';
   for (let t = tA; t <= tB + 1; t += 15 * DAY) g.fillText(dfmt(t), Math.min(Math.max(X(t), L + 14), W - R - 14), H - 10);
   g.strokeStyle = css('--mute'); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(tL), T); g.lineTo(X(tL), T + ph); g.stroke(); g.setLineDash([]);
-  g.fillStyle = css('--mute'); g.textAlign = 'right'; g.fillText('last data ' + dfmt(tL), X(tL) - 6, T + 12);
+  g.fillStyle = css('--mute'); g.textAlign = 'right'; g.fillText('as of ' + dfmt(tL), X(tL) - 6, T + 12);
   g.strokeStyle = css('--g3'); g.lineWidth = 2.4; g.beginPath(); act.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke();
   const poly = (iLo, iHi, a) => { g.fillStyle = acc + a; g.beginPath(); pr.forEach((r, i) => i ? g.lineTo(X(r[0]), Y(r[iHi])) : g.moveTo(X(r[0]), Y(r[iHi])));
     for (let i = pr.length - 1; i >= 0; i--) g.lineTo(X(pr[i][0]), Y(pr[i][iLo])); g.closePath(); g.fill(); };
   poly(2, 5, '22'); poly(3, 4, '40');
   g.strokeStyle = acc; g.lineWidth = 2.4; g.setLineDash([6, 4]); g.beginPath(); pr.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke(); g.setLineDash([]);
+  if (real.length > 1){ g.strokeStyle = css('--text'); g.globalAlpha = 0.6; g.lineWidth = 2.2; g.beginPath(); real.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke(); g.globalAlpha = 1; }
   const [te, ve] = pr[pr.length - 1]; g.fillStyle = acc; g.beginPath(); g.arc(X(te), Y(ve), 4, 0, 7); g.fill();
   g.textAlign = 'left'; g.fillText('$' + Math.round(ve / 100) / 10 + 'k', X(te) + 7, Y(ve) + 4);
 
@@ -284,7 +307,7 @@ function draw(res){
   g.clearRect(0, 0, W, H); g.fillStyle = css('--mute'); g.font = '11px system-ui'; g.textAlign = 'left';
   g.fillText('impulse response (tap offset in days)', l2 + 4, 12);
   g.strokeStyle = css('--line'); g.beginPath(); g.moveTo(l2, yz); g.lineTo(W - r2, yz); g.stroke();
-  const dpt = totalDays / N;
+  const dpt = td() / N;
   for (let i = 0; i < t; i++){
     const x = l2 + (t === 1 ? 0.5 : i / (t - 1)) * pw2, y = yz - (h[i] / hm) * amp;
     g.strokeStyle = acc; g.lineWidth = Math.max(1.5, Math.min(4, pw2 / t * 0.5)); g.beginPath(); g.moveTo(x, yz); g.lineTo(x, y); g.stroke();
@@ -294,26 +317,70 @@ function draw(res){
 }
 
 function readout(res, ms){
-  const { act, pr } = zoomSeries(res), p0 = act[act.length - 1][1], end = pr[pr.length - 1], p60 = end[1];
+  const { act, pr, real } = zoomSeries(res), p0 = act[act.length - 1][1], end = pr[pr.length - 1], p60 = end[1], base = BASES[res.cur];
   $('s60').textContent = fmtUsd(p60);
   $('s60b').textContent = (p60 >= p0 ? '+' : '') + ((p60 / p0 - 1) * 100).toFixed(1) + '% · 50%: ' + fmtUsd(end[3]) + '–' + fmtUsd(end[4]) + ' · 90%: ' + fmtUsd(end[2]) + '–' + fmtUsd(end[5]);
-  const price = BASES[3] * Math.exp(res.proj[N - 1]);
-  $('sPrice').textContent = fmtUsd(price);
-  $('sBand').textContent = fmtUsd(BASES[3] * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(BASES[3] * Math.exp(res.proj[N - 1] + res.valRmse));
+  const rl = real[real.length - 1];
+  $('s60c').textContent = real.length > 1 ? 'actual by ' + dfmt(rl[0]) + ': ' + fmtUsd(rl[1]) + ' (' + (rl[1] >= p0 ? '+' : '') + ((rl[1] / p0 - 1) * 100).toFixed(1) + '%)' : '';
+  $('sPrice').textContent = fmtUsd(base * Math.exp(res.proj[N - 1]));
+  $('sBand').textContent = fmtUsd(base * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(base * Math.exp(res.proj[N - 1] + res.valRmse));
   $('sGain').textContent = res.gain.toFixed(2);
   $('sVal').textContent = '±' + Math.round((Math.exp(res.valRmse) - 1) * 100) + '%';
   $('sTime').textContent = 'retrained in ' + Math.round(ms) + ' ms';
-  $('foot').textContent = 'Data through ' + new Date(lastDate()).toISOString().slice(0, 10) + (state.live ? ' (live)' : ' (embedded snapshot; live fetch unavailable)') +
-    ' · Cycle 4 observed ' + Math.round(res.iLast / (N - 1) * 100) + '% · filter spans ±' + Math.round((res.taps >> 1) * totalDays / N) + ' days';
+  const atNow = state.asOf >= lastDate();
+  $('foot').textContent = (atNow ? 'Data through ' + new Date(lastDate()).toISOString().slice(0, 10) + (state.live ? ' (live)' : ' (embedded snapshot; live fetch unavailable)')
+      : 'Time travel: the filter only sees data up to ' + new Date(state.asOf).toISOString().slice(0, 10)) +
+    ' · Cycle ' + (res.cur + 1) + ' observed ' + Math.round(res.iLast / (N - 1) * 100) + '% · filter spans ±' + Math.round((res.taps >> 1) * td() / N) + ' days';
 }
 
-let last = null, timer = null;
+let last = null, timer = null, playing = false;
+const iso = ms => new Date(ms).toISOString().slice(0, 10);
 function compute(epochs){
   const t0 = performance.now();
-  last = engine.run(state.taps, epochs, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value));
-  readout(last, performance.now() - t0); draw(last);
+  last = engine.run(state.taps, epochs, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value), state.cur);
+  last.cur = state.cur;
+  readout(last, performance.now() - t0); draw(last); drawStrip();
 }
 function schedule(){ clearTimeout(timer); compute(900); timer = setTimeout(() => compute(5000), 220); }
+
+function drawStrip(){
+  const [g, W, H] = setupCanvas($('strip')), a = HAL[2], b = lastDate(), L = 4, R = 4, T = 4, B = 4, pw = W - L - R, ph = H - T - B;
+  const i0 = Math.round((a - PX.t0) / DAY), n = PX.p.length - i0;
+  let lo = Infinity, hi = -Infinity; for (let i = i0; i < PX.p.length; i++){ const v = Math.log(PX.p[i]); lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  const X = t => L + (t - a) / (b - a) * pw, Y = v => T + (1 - (Math.log(v) - lo) / (hi - lo)) * ph;
+  g.clearRect(0, 0, W, H);
+  const xa = X(state.asOf);
+  g.fillStyle = css('--line'); g.globalAlpha = 0.35; g.fillRect(xa, T, L + pw - xa, ph); g.globalAlpha = 1;
+  g.strokeStyle = css('--line'); g.lineWidth = 1; [HAL[3]].forEach(h => { if (h > a && h < b){ g.beginPath(); g.moveTo(X(h), T); g.lineTo(X(h), T + ph); g.stroke(); } });
+  g.strokeStyle = css('--g3'); g.lineWidth = 1.4; g.beginPath();
+  for (let i = i0; i < PX.p.length; i += 2){ const x = X(PX.t0 + i * DAY); i === i0 ? g.moveTo(x, Y(PX.p[i])) : g.lineTo(x, Y(PX.p[i])); } g.stroke();
+  g.strokeStyle = css('--accent'); g.lineWidth = 2; g.beginPath(); g.moveTo(xa, T); g.lineTo(xa, T + ph); g.stroke();
+  g.fillStyle = css('--accent'); g.beginPath(); g.arc(xa, Y(PX.p[Math.round((state.asOf - PX.t0) / DAY)]), 3.5, 0, 7); g.fill();
+}
+function syncScrub(){
+  const s = $('asof'); s.max = Math.round((lastDate() - MIN_ASOF) / DAY); s.value = Math.round((state.asOf - MIN_ASOF) / DAY);
+  $('asofLab').textContent = state.asOf >= lastDate() ? 'Now · ' + iso(state.asOf) : iso(state.asOf);
+}
+function goto(ms, epochs){
+  ms = Math.max(MIN_ASOF, Math.min(lastDate(), Math.round(ms / DAY) * DAY));
+  state.asOf = ms; state.cur = ms >= HAL[3] ? 3 : 2;
+  refreshSignals(ms); engine.setSig && engine.setSig(); syncScrub();
+  if (epochs) compute(epochs); else schedule();
+}
+$('asof').addEventListener('input', e => { playing = false; $('bPlay').textContent = '▶ Play'; goto(MIN_ASOF + (+e.target.value) * DAY); });
+$('bBack').onclick = () => { playing = false; goto(state.asOf - 7 * DAY); };
+$('bFwd').onclick = () => { playing = false; goto(state.asOf + 7 * DAY); };
+$('bNow').onclick = () => { playing = false; $('bPlay').textContent = '▶ Play'; goto(lastDate()); };
+$('bPlay').onclick = async () => {
+  if (playing){ playing = false; return; }
+  playing = true; $('bPlay').textContent = '❚❚ Pause';
+  if (state.asOf >= lastDate() - 2 * DAY) goto(MIN_ASOF, 500);
+  while (playing && state.asOf < lastDate()){
+    goto(state.asOf + 3 * DAY, 500);
+    await new Promise(r => requestAnimationFrame(r));
+  }
+  const done = playing; playing = false; $('bPlay').textContent = '▶ Play'; compute(5000);
+};
 
 /* knob */
 const A0 = -135, A1 = 135;
@@ -324,7 +391,7 @@ function renderKnob(){
   $('arcBg').setAttribute('d', arc(A0, A1)); $('arcFg').setAttribute('d', arc(A0, Math.max(a, A0 + 0.01)));
   const [px, py] = polar(a, 38); $('pointer').setAttribute('x2', px); $('pointer').setAttribute('y2', py);
   $('tapsVal').textContent = state.taps; $('knob').setAttribute('aria-valuenow', state.taps);
-  $('tapsSpan').textContent = '±' + Math.round((state.taps >> 1) * totalDays / N) + ' day window';
+  $('tapsSpan').textContent = '±' + Math.round((state.taps >> 1) * td() / N) + ' day window';
 }
 function setTaps(v){ v = Math.round((Math.max(TMIN, Math.min(TMAX, v)) - 1) / 2) * 2 + 1; if (v !== state.taps){ state.taps = v; renderKnob(); schedule(); } }
 (() => {
@@ -346,13 +413,14 @@ function setTaps(v){ v = Math.round((Math.max(TMIN, Math.min(TMAX, v)) - 1) / 2)
 })();
 function sliders(){ $('smV').textContent = (10 ** $('smooth').value).toPrecision(2); $('l2V').textContent = (10 ** $('l2').value).toExponential(0); }
 ['smooth', 'l2'].forEach(id => $(id).addEventListener('input', () => { sliders(); schedule(); }));
-addEventListener('resize', () => last && draw(last));
+addEventListener('resize', () => { if (last){ draw(last); drawStrip(); } });
 
 (async () => {
   try { engine = await loadWasm(); $('badge').textContent = 'Rust · WebAssembly'; $('badge').classList.add('rust'); }
   catch (e) { $('badge').textContent = 'JavaScript engine (build fir.wasm for Rust)'; }
-  sliders(); renderKnob(); compute(5000);
-  if (await fetchLatest()){ state.live = true; refreshSignals(); engine.setSig && engine.setSig(); compute(5000); }
+  sliders(); renderKnob(); refreshSignals(); engine.setSig && engine.setSig(); syncScrub(); compute(5000);
+  const wasNow = state.asOf >= lastDate();
+  if (await fetchLatest()){ state.live = true; if (wasNow) state.asOf = lastDate(); goto(state.asOf, 5000); }
 })();
 </script>
 </body>

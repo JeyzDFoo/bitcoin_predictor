@@ -152,37 +152,41 @@ fn apply(x: &[f64], h: &[f64], b: f64, out: &mut [f64]) {
     }
 }
 
-/// Fit the filter with `taps` taps (forced odd, 3..=MAXT) and project Cycle 4.
+/// Fit the filter with `taps` taps (forced odd, 3..=MAXT) and project cycle `cur`
+/// (2 = Cycle 3, 3 = Cycle 4). Cycles before `cur` are complete; `cur` is the observed part.
 #[no_mangle]
-pub extern "C" fn run(taps: u32, epochs: u32, l2: f64, smooth: f64) {
+pub extern "C" fn run(taps: u32, epochs: u32, l2: f64, smooth: f64, cur: u32) {
     let mut taps = (taps as usize).clamp(3, MAXT);
     if taps % 2 == 0 {
         taps += 1;
     }
+    let cur = (cur as usize).clamp(2, 3);
     let epochs = epochs as usize;
     let sig: &[f64] = unsafe { &*(&raw const SIG as *const [f64; 4 * N]) };
-    let (c1, c2, c3, c4) = (&sig[0..N], &sig[N..2 * N], &sig[2 * N..3 * N], &sig[3 * N..4 * N]);
+    let c: Vec<&[f64]> = (0..4).map(|k| &sig[k * N..(k + 1) * N]).collect();
 
-    let i_last = (0..N).rev().find(|&i| !c4[i].is_nan()).unwrap_or(0);
+    let i_last = (0..N).rev().find(|&i| !c[cur][i].is_nan()).unwrap_or(0);
 
-    // Out-of-sample check: fit on C1->C2, C2->C3 only, score on observed C4.
-    let v = train(&[(c1, c2), (c2, c3)], taps, epochs, l2, smooth);
+    // Out-of-sample check: fit on complete pairs only, score on the observed part of `cur`.
+    let vpairs: Vec<(&[f64], &[f64])> = (0..cur - 1).map(|j| (c[j], c[j + 1])).collect();
+    let v = train(&vpairs, taps, epochs, l2, smooth);
     let mut vp = vec![0.0; N];
-    apply(c3, &v.h, v.b, &mut vp);
+    apply(c[cur - 1], &v.h, v.b, &mut vp);
     let (mut se, mut cnt) = (0.0, 0.0);
     for i in 0..N {
-        if !c4[i].is_nan() {
-            se += (vp[i] - c4[i]).powi(2);
+        if !c[cur][i].is_nan() {
+            se += (vp[i] - c[cur][i]).powi(2);
             cnt += 1.0;
         }
     }
-    let val_rmse = (se / cnt).sqrt();
+    let val_rmse = if cnt > 0.0 { (se / cnt).sqrt() } else { 0.0 };
 
-    // Final fit including the observed part of C4.
-    let f = train(&[(c1, c2), (c2, c3), (c3, c4)], taps, epochs, l2, smooth);
+    // Final fit including the observed part of `cur`.
+    let fpairs: Vec<(&[f64], &[f64])> = (0..cur).map(|j| (c[j], c[j + 1])).collect();
+    let f = train(&fpairs, taps, epochs, l2, smooth);
     let mut proj = vec![0.0; N];
-    apply(c3, &f.h, f.b, &mut proj);
-    let shift = c4[i_last] - proj[i_last];
+    apply(c[cur - 1], &f.h, f.b, &mut proj);
+    let shift = c[cur][i_last] - proj[i_last];
 
     let gain: f64 = f.h.iter().sum();
     let half = (taps / 2) as f64;
