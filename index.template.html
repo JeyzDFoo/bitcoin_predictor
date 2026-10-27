@@ -415,10 +415,19 @@ function schedule(){ clearTimeout(timer); compute(0); }
 
 const trendTable = taps => { const T = DATA.trend.taps, ks = Object.keys(T).map(Number); return T[ks.reduce((a, c) => Math.abs(c - taps) < Math.abs(a - taps) ? c : a)]; };
 const pct = v => (v >= 0 ? '+' : '') + ((Math.exp(v) - 1) * 100).toFixed(0) + '%';
+const pxAt = ms => PX.p[Math.round((ms - PX.t0) / DAY)], lrAt = (a, c) => Math.log(pxAt(c) / pxAt(a));
+/* 90-day forecast from t in cycle k. Model path where the cycle can be fit; where it can't (cycle too young, or the window runs past the
+   next halving) the previous cycle's own curve is used instead. a=1 marks those filled-in stretches. */
+function trendPred(res, t, k){
+  const s = HAL[k], e = HAL[k + 1], d0 = Math.round((t - s) / DAY);
+  if (d0 < WARMUP[k]) return { v: lrAt(HAL[k - 1] + d0 * DAY, HAL[k - 1] + (d0 + 90) * DAY), a: 1 };
+  if (t + 90 * DAY <= e) return { v: projLog(res, t + 90 * DAY) - projLog(res, t), a: 0 };
+  const r = Math.round((t + 90 * DAY - e) / DAY);
+  return { v: projLog(res, e) - projLog(res, t) + lrAt(s, s + r * DAY), a: 1 };
+}
 function trendSignal(res){
-  const t = state.asOf, e = HAL[res.cur + 1], t1 = Math.min(t + 90 * DAY, e);
-  const px = ms => PX.p[Math.round((ms - PX.t0) / DAY)];
-  return { pred: projLog(res, t1) - projLog(res, t), actual: t + 90 * DAY <= lastDate() ? Math.log(px(t + 90 * DAY) / px(t)) : null };
+  const t = state.asOf, q = trendPred(res, t, res.cur);
+  return { pred: q.v, filled: q.a, actual: t + 90 * DAY <= lastDate() ? lrAt(t, t + 90 * DAY) : null };
 }
 function drawTrend(res){
   const T = track || trendTable(state.taps), sig = trendSignal(res), [g, W, H] = setupCanvas($('trend'));
@@ -435,7 +444,7 @@ function drawTrend(res){
     g.fillStyle = css('--mute'); g.font = '10px system-ui'; g.textAlign = 'center'; g.save(); g.translate((xa_ + xb_) / 2 + 3, Tp + ph / 2);
     if (xb_ - xa_ < 70) g.rotate(-Math.PI / 2); g.fillText(label, 0, 0); g.restore(); g.font = '11px system-ui';
   };
-  for (let i = 1; i < T.d.length; i++) if (T.d[i] - T.d[i - 1] > 10 * DAY) hatch(X(T.d[i - 1] + 3.5 * DAY), X(T.d[i] - 3.5 * DAY), 'halving: no test');
+  if (T.a) T.d.forEach((d, i) => { if (T.a[i]){ g.fillStyle = css('--mute'); g.globalAlpha = 0.9; g.fillRect(X(d - 3.5 * DAY), Tp, X(d + 3.5 * DAY) - X(d - 3.5 * DAY) + 0.6, 4); g.globalAlpha = 1; } });
   hatch(X(T.d[T.d.length - 1] + 3.5 * DAY), X(x1), 'outcome pending');
   g.strokeStyle = css('--line'); g.fillStyle = css('--mute'); g.textAlign = 'right'; g.lineWidth = 1;
   [-0.5, 0, 0.5, 1].filter(v => Math.abs(v) <= m).forEach(v => { g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke(); g.fillText(pct(v), L - 6, Y(v) + 4); });
@@ -447,7 +456,7 @@ function drawTrend(res){
   g.strokeStyle = acc; g.lineWidth = 2; g.fillStyle = css('--bg'); g.beginPath(); g.arc(xa, Y(sig.pred), 5, 0, 7); g.fill(); g.stroke();
   if (sig.actual !== null){ g.fillStyle = css('--g3'); g.beginPath(); g.arc(xa, Y(sig.actual), 4, 0, 7); g.fill(); }
   $('trendNote').textContent = '90-day return by as-of date: predicted (blue) vs actual (grey). Green columns = direction right, red = wrong. Walk-forward, direction right ' +
-    Math.round(T.hit * 100) + '% of ' + T.n + ' weekly dates (always-up: ' + Math.round(Math.max(T.up, 1 - T.up) * 100) + '%). Ring = the selected date\'s prediction. Shaded gaps: "halving" = a 90-day forecast would cross a halving, so it isn\'t tested; "outcome pending" = the last 90 days, whose result isn\'t known yet.' + (T.live ? ' Recomputed live for your current settings.' : ' Precomputed at the default settings.');
+    Math.round(T.hit * 100) + '% of ' + T.n + ' weekly dates (always-up: ' + Math.round(Math.max(T.up, 1 - T.up) * 100) + '%). Ring = the selected date\'s prediction. Grey ticks along the top = dates where the cycle can\'t be fit (the new cycle is too young, or the 90 days run past a halving), so the previous cycle\'s own curve is used for that stretch (direction right ' + (T.a ? Math.round(100 * T.d.filter((_, i) => T.a[i] && Math.sign(T.p[i]) === Math.sign(T.r[i])).length / Math.max(1, T.a.reduce((x, y) => x + y, 0))) + '%' : 'n/a') + ' there). Shaded: "outcome pending" = the last 90 days, whose result isn\'t known yet.' + (T.live ? ' Recomputed live for your current settings.' : ' Precomputed at the default settings.');
 }
 const WARMUP = { 2: 120, 3: 30 };
 function startTrack(){
@@ -458,20 +467,21 @@ function startTrack(){
 }
 async function runTrack(job, key){
   const dates = [], l2 = 10 ** parseFloat($('l2').value), sm = 10 ** parseFloat($('smooth').value);
-  for (const k of [2, 3]) for (let t = HAL[k] + WARMUP[k] * DAY; t + 90 * DAY <= Math.min(lastDate(), HAL[k + 1]); t += 7 * DAY) dates.push([t, k]);
-  const buf = new Float64Array(4 * N), d = [], p = [], r = [], px = ms => PX.p[Math.round((ms - PX.t0) / DAY)];
+  for (const k of [2, 3]) for (let t = HAL[k]; t + 90 * DAY <= lastDate() && t < HAL[k + 1]; t += 7 * DAY) dates.push([t, k]);
+  const buf = new Float64Array(4 * N), d = [], p = [], r = [], a = [];
   $('trendNote').textContent = 'Recomputing the walk-forward track record for the current settings…';
   for (let i = 0; i < dates.length; i++){
     if (job !== trackJob) return;
     const [t, k] = dates[i];
-    refreshSignals(t, buf);
-    const res = engine.run(state.taps, 0, l2, sm, k, state.gamma, buf); res.cur = k;
-    d.push(t); p.push(projLog(res, t + 90 * DAY) - projLog(res, t)); r.push(Math.log(px(t + 90 * DAY) / px(t)));
+    let res = null;
+    if (Math.round((t - HAL[k]) / DAY) >= WARMUP[k]){ refreshSignals(t, buf); res = engine.run(state.taps, 0, l2, sm, k, state.gamma, buf); res.cur = k; }
+    const q = trendPred(res, t, k);
+    d.push(t); p.push(q.v); a.push(q.a); r.push(lrAt(t, t + 90 * DAY));
     if (i % 5 === 4) await new Promise(res_ => setTimeout(res_, 0));
   }
   if (job !== trackJob) return;
   const n = d.length, hit = d.filter((_, i) => Math.sign(p[i]) === Math.sign(r[i])).length / n, up = r.filter(v => v > 0).length / n;
-  track = { d, p, r, hit, up, n, live: true }; trackKey = key;
+  track = { d, p, r, a, hit, up, n, live: true }; trackKey = key;
   if (last){ readout(last, lastMs); drawTrend(last); }
 }
 function drawStrip(){
