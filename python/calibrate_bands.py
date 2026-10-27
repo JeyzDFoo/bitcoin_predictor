@@ -11,6 +11,7 @@ Run: python calibrate_bands.py [btc.csv]   ->  bands.json
 import sys, json
 import numpy as np, pandas as pd
 import backtest as b
+import model
 
 HS = list(range(0, 61, 5))
 QS = {"q05": 5, "q25": 25, "q75": 75, "q95": 95}
@@ -18,17 +19,14 @@ TAPS = [21, 41, 61, 81]
 
 
 def main(path):
-    p = b.load(path); last = p.index[-1]
+    p = b.load(path); last = p.index[-1]; pc = model.clean(p, model.CLIP)
     errs = {t: {h: [] for h in HS} for t in TAPS}
     for k in (2, 3):
         s, e = b.HAL[k], b.HAL[k + 1]
         t = b.HAL[k] + pd.Timedelta(days=b.MIN_OBS_DAYS)
         while t + pd.Timedelta(days=max(HS)) <= min(last, e):
-            sigs = [b.cycle_signal(p, j, t) for j in range(k + 1)]
-            pairs = [(sigs[j], sigs[j + 1]) for j in range(k)]
             for taps in TAPS:
-                h_, b_ = b.fit(pairs, taps)
-                path_ = b.conv_matrix(sigs[k - 1], taps) @ h_ + b_
+                path_ = model.forecast_path(pc, k, t, taps)
                 f0 = b.interp_at(path_, (t - s) / (e - s))
                 for h in HS:
                     td = t + pd.Timedelta(days=h)

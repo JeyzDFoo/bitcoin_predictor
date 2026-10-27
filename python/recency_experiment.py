@@ -15,7 +15,6 @@ def wfit(pairs, weights, taps):
         M = b.conv_matrix(x, taps); ok = ~np.isnan(t)
         A.append(np.hstack([M, np.ones((b.N, 1))])[ok]); y.append(t[ok]); w.append(np.full(ok.sum(), wt))
     A, y, w = np.vstack(A), np.concatenate(y), np.concatenate(w)
-    m = w.sum() * len(w) / len(w) / (w.mean() if w.mean() > 0 else 1) / 1.0
     m = len(y)
     half = taps // 2; r = np.abs(np.arange(taps) - half) / max(half, 1)
     P = np.zeros((taps + 1, taps + 1)); D = np.diff(np.eye(taps), 2, axis=0)

@@ -46,6 +46,43 @@ fn conv_row(x: &[f64], taps: usize, n: usize, out: &mut [f64]) {
     }
 }
 
+/// Solve mat * x = rhs (k x k, row-major) by Gaussian elimination with partial pivoting.
+fn gauss_solve(mut mat: Vec<f64>, mut rhs: Vec<f64>, k: usize) -> Vec<f64> {
+    for c in 0..k {
+        let mut piv = c;
+        for r in c + 1..k {
+            if mat[r * k + c].abs() > mat[piv * k + c].abs() {
+                piv = r;
+            }
+        }
+        if piv != c {
+            for j in 0..k {
+                mat.swap(c * k + j, piv * k + j);
+            }
+            rhs.swap(c, piv);
+        }
+        let d = mat[c * k + c];
+        for r in c + 1..k {
+            let f = mat[r * k + c] / d;
+            if f != 0.0 {
+                for j in c..k {
+                    mat[r * k + j] -= f * mat[c * k + j];
+                }
+                rhs[r] -= f * rhs[c];
+            }
+        }
+    }
+    let mut x = vec![0.0; k];
+    for c in (0..k).rev() {
+        let mut v = rhs[c];
+        for j in c + 1..k {
+            v -= mat[c * k + j] * x[j];
+        }
+        x[c] = v / mat[c * k + c];
+    }
+    x
+}
+
 struct Fit {
     h: Vec<f64>,
     b: f64,
@@ -53,12 +90,13 @@ struct Fit {
 }
 
 /// Train h, b by full-batch Adam on (input, target) cycle pairs.
-fn train(pairs: &[(&[f64], &[f64])], taps: usize, epochs: usize, l2: f64, smooth: f64) -> Fit {
+fn train(pairs: &[(&[f64], &[f64], f64)], taps: usize, epochs: usize, l2: f64, smooth: f64) -> Fit {
     // Build design matrix (rows with a known target only).
     let mut a: Vec<f64> = Vec::new();
     let mut y: Vec<f64> = Vec::new();
+    let mut sw: Vec<f64> = Vec::new();
     let mut row = vec![0.0; taps];
-    for (x, t) in pairs {
+    for (x, t, wt) in pairs {
         for n in 0..N {
             if t[n].is_nan() {
                 continue;
@@ -66,9 +104,15 @@ fn train(pairs: &[(&[f64], &[f64])], taps: usize, epochs: usize, l2: f64, smooth
             conv_row(x, taps, n, &mut row);
             a.extend_from_slice(&row);
             y.push(t[n]);
+            sw.push(*wt);
         }
     }
     let m = y.len();
+    // normalise sample weights to mean 1 so the data/penalty balance does not depend on gamma
+    let mean_w = sw.iter().sum::<f64>() / m as f64;
+    for v in sw.iter_mut() {
+        *v /= mean_w;
+    }
     let half = taps / 2;
 
     // Tapered penalty: outer taps cost more (windowing).
@@ -78,6 +122,55 @@ fn train(pairs: &[(&[f64], &[f64])], taps: usize, epochs: usize, l2: f64, smooth
             l2 * (1.0 + 200.0 * r.powi(4))
         })
         .collect();
+
+    // epochs == 0: exact minimiser of the same objective (weighted ridge + smoothness), no iteration.
+    if epochs == 0 {
+        let k = taps + 1;
+        let mut mat = vec![0.0; k * k];
+        let mut rhs = vec![0.0; k];
+        for r in 0..m {
+            let ar = &a[r * taps..(r + 1) * taps];
+            let wr = sw[r] / m as f64;
+            for i in 0..taps {
+                let ai = ar[i] * wr;
+                for j in 0..taps {
+                    mat[i * k + j] += ai * ar[j];
+                }
+                mat[i * k + taps] += ai;
+                mat[taps * k + i] += ai;
+                rhs[i] += ai * y[r];
+            }
+            mat[taps * k + taps] += wr;
+            rhs[taps] += wr * y[r];
+        }
+        for i in 0..taps {
+            mat[i * k + i] += w[i];
+        }
+        if taps >= 3 {
+            let coef = [1.0, -2.0, 1.0];
+            for i in 0..taps - 2 {
+                for p in 0..3 {
+                    for q in 0..3 {
+                        mat[(i + p) * k + (i + q)] += smooth * coef[p] * coef[q];
+                    }
+                }
+            }
+        }
+        mat[taps * k + taps] += 1e-9;
+        let sol = gauss_solve(mat, rhs, k);
+        let h: Vec<f64> = sol[..taps].to_vec();
+        let b = sol[taps];
+        let mut se = 0.0;
+        for r in 0..m {
+            let ar = &a[r * taps..(r + 1) * taps];
+            let mut v = b;
+            for j in 0..taps {
+                v += ar[j] * h[j];
+            }
+            se += (v - y[r]).powi(2);
+        }
+        return Fit { h, b, rmse: (se / m as f64).sqrt() };
+    }
 
     let mut h = vec![0.0; taps];
     h[half] = 0.5;
@@ -104,7 +197,7 @@ fn train(pairs: &[(&[f64], &[f64])], taps: usize, epochs: usize, l2: f64, smooth
         }
         let inv_m = 1.0 / m as f64;
         for r in 0..m {
-            let e = err[r] * inv_m;
+            let e = err[r] * sw[r] * inv_m;
             let ar = &a[r * taps..(r + 1) * taps];
             for j in 0..taps {
                 gh[j] += ar[j] * e;
@@ -118,7 +211,7 @@ fn train(pairs: &[(&[f64], &[f64])], taps: usize, epochs: usize, l2: f64, smooth
                 gh[i + 2] += d;
             }
         }
-        let gb = err.iter().sum::<f64>() * inv_m;
+        let gb = err.iter().zip(sw.iter()).map(|(e, w)| e * w).sum::<f64>() * inv_m;
         // Adam
         let (c1, c2) = (1.0 - b1.powi(t as i32), 1.0 - b2.powi(t as i32));
         for j in 0..taps {
@@ -155,7 +248,7 @@ fn apply(x: &[f64], h: &[f64], b: f64, out: &mut [f64]) {
 /// Fit the filter with `taps` taps (forced odd, 3..=MAXT) and project cycle `cur`
 /// (2 = Cycle 3, 3 = Cycle 4). Cycles before `cur` are complete; `cur` is the observed part.
 #[no_mangle]
-pub extern "C" fn run(taps: u32, epochs: u32, l2: f64, smooth: f64, cur: u32) {
+pub extern "C" fn run(taps: u32, epochs: u32, l2: f64, smooth: f64, cur: u32, gamma: f64) {
     let mut taps = (taps as usize).clamp(3, MAXT);
     if taps % 2 == 0 {
         taps += 1;
@@ -168,7 +261,7 @@ pub extern "C" fn run(taps: u32, epochs: u32, l2: f64, smooth: f64, cur: u32) {
     let i_last = (0..N).rev().find(|&i| !c[cur][i].is_nan()).unwrap_or(0);
 
     // Out-of-sample check: fit on complete pairs only, score on the observed part of `cur`.
-    let vpairs: Vec<(&[f64], &[f64])> = (0..cur - 1).map(|j| (c[j], c[j + 1])).collect();
+    let vpairs: Vec<(&[f64], &[f64], f64)> = (0..cur - 1).map(|j| (c[j], c[j + 1], gamma.powi((cur - 2 - j) as i32))).collect();
     let v = train(&vpairs, taps, epochs, l2, smooth);
     let mut vp = vec![0.0; N];
     apply(c[cur - 1], &v.h, v.b, &mut vp);
@@ -182,7 +275,7 @@ pub extern "C" fn run(taps: u32, epochs: u32, l2: f64, smooth: f64, cur: u32) {
     let val_rmse = if cnt > 0.0 { (se / cnt).sqrt() } else { 0.0 };
 
     // Final fit including the observed part of `cur`.
-    let fpairs: Vec<(&[f64], &[f64])> = (0..cur).map(|j| (c[j], c[j + 1])).collect();
+    let fpairs: Vec<(&[f64], &[f64], f64)> = (0..cur).map(|j| (c[j], c[j + 1], gamma.powi((cur - 1 - j) as i32))).collect();
     let f = train(&fpairs, taps, epochs, l2, smooth);
     let mut proj = vec![0.0; N];
     apply(c[cur - 1], &f.h, f.b, &mut proj);

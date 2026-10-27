@@ -7,6 +7,7 @@ Run: python calibrate_trend.py [btc.csv]  ->  trend.json
 import sys, json
 import numpy as np, pandas as pd
 import backtest as b
+import model
 
 H = 90
 TAPS = [21, 41, 61, 81]
@@ -14,7 +15,7 @@ WARMUP = {2: 120, 3: 30}   # days of the current cycle observed before testing s
 
 
 def main(path):
-    p = b.load(path); last = p.index[-1]
+    p = b.load(path); last = p.index[-1]; pc = model.clean(p, model.CLIP)
     out = {"horizon": H, "taps": {}}
     for taps in TAPS:
         D, P, R = [], [], []
@@ -22,9 +23,7 @@ def main(path):
             s, e = b.HAL[k], b.HAL[k + 1]
             t = b.HAL[k] + pd.Timedelta(days=WARMUP[k])
             while t + pd.Timedelta(days=H) <= min(last, e):
-                sigs = [b.cycle_signal(p, j, t) for j in range(k + 1)]
-                h_, b_ = b.fit([(sigs[j], sigs[j + 1]) for j in range(k)], taps)
-                path_ = b.conv_matrix(sigs[k - 1], taps) @ h_ + b_
+                path_ = model.forecast_path(pc, k, t, taps)
                 f = lambda d: b.interp_at(path_, (t + pd.Timedelta(days=d) - s) / (e - s))
                 D.append(int(t.value // 1_000_000)); P.append(round(float(f(H) - f(0)), 4))
                 R.append(round(float(np.log(p.loc[t + pd.Timedelta(days=H)] / p.loc[t])), 4))

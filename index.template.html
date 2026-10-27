@@ -84,6 +84,10 @@
         <input id="smooth" type="range" min="-3" max="1" step="0.1" value="-1"></div>
       <div class="ctl"><label><span>Edge penalty (L2)</span><span id="l2V"></span></label>
         <input id="l2" type="range" min="-5" max="-1" step="0.1" value="-3"></div>
+      <div class="ctl"><label><span>Recency decay <small>(1 = off)</small></span><span id="gmV"></span></label>
+        <input id="gamma" type="range" min="0.2" max="1" step="0.05" value="0.5"></div>
+      <div class="ctl"><label><span>Shock clip <small>(σ, max = off)</small></span><span id="clV"></span></label>
+        <input id="clip" type="range" min="2" max="6" step="0.5" value="2.5"></div>
       <div class="foot">Drag, scroll, or use ←/→ on the dial.</div>
     </div>
 
@@ -112,26 +116,45 @@
       <div class="foot" id="foot"></div>
     </div>
   </div>
-  <div class="foot">Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), calibrated on this same history, not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare, Kraken or Coinbase when online.</div>
+  <div class="foot">Bands and the 90-day track record are calibrated at the default settings (recency 0.5, shock clip 2.5σ). Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), calibrated on this same history, not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare, Kraken or Coinbase when online.</div>
 </div>
 
 <script>
 const DATA = __DATA__;
 const N = DATA.n, MAXT = 101;
 const SIG = new Float64Array(4 * N).fill(NaN);
+var state = { taps: 41, gamma: 0.5, clip: 2.5, cur: 3, asOf: 0 };
 const DAY = 864e5, HAL = DATA.halvings.map(d => Date.parse(d + 'T00:00:00Z'));
 let PX = { t0: Date.parse(DATA.daily.start + 'T00:00:00Z'), p: Float64Array.from(DATA.daily.p) };
+state.asOf = PX.t0 + (PX.p.length - 1) * 864e5;
 let BASES = DATA.base.slice();
+let CL = null, CLkey = '';
+function cleanSeries(k){            // causal shock clipping: |daily log return| capped at k rolling sigmas (k >= 6 = off)
+  const p = PX.p, n = p.length, out = new Float64Array(n), r = new Float64Array(n); out[0] = p[0];
+  for (let i = 1; i < n; i++) r[i] = Math.log(p[i] / p[i - 1]);
+  let cum = 0;
+  for (let i = 1; i < n; i++){
+    let lim = Infinity;
+    if (k < 6){
+      const lo = Math.max(0, i - 90), cnt = i - lo;
+      if (cnt >= 30){ let s = 0, s2 = 0; for (let j = lo; j < i; j++){ s += r[j]; s2 += r[j] * r[j]; }
+        const mean = s / cnt, v = (s2 - cnt * mean * mean) / (cnt - 1); lim = k * Math.sqrt(Math.max(v, 0)); }
+    }
+    cum += Math.max(-lim, Math.min(lim, r[i])); out[i] = Math.exp(Math.log(p[0]) + cum);
+  }
+  return out;
+}
 const lastDate = () => PX.t0 + (PX.p.length - 1) * DAY;
 function refreshSignals(cutoff = lastDate()){
+  const key = state.clip + ':' + PX.p.length; if (key !== CLkey){ CL = cleanSeries(state.clip); CLkey = key; }
   SIG.fill(NaN);
   for (let k = 0; k < 4; k++){
     const s = HAL[k], e = HAL[k + 1];
     const i0 = Math.round((s - PX.t0) / DAY), i1 = Math.min(Math.round((e - PX.t0) / DAY), PX.p.length - 1, Math.round((cutoff - PX.t0) / DAY));
     if (i1 <= i0) continue;
-    const p0 = PX.p[i0]; BASES[k] = p0;
+    const p0 = CL[i0]; BASES[k] = p0;
     const ph = [], lv = [];
-    for (let i = i0; i <= i1; i++){ ph.push((PX.t0 + i * DAY - s) / (e - s)); lv.push(Math.log(PX.p[i] / p0)); }
+    for (let i = i0; i <= i1; i++){ ph.push((PX.t0 + i * DAY - s) / (e - s)); lv.push(Math.log(CL[i] / p0)); }
     const phMax = ph[ph.length - 1]; let j = 0;
     for (let n = 0; n < N; n++){
       const g = n / (N - 1); if (g > phMax) break;
@@ -170,17 +193,44 @@ const JSEngine = (() => {
       let idx = n + half - j; idx = idx < 0 ? 0 : idx > N - 1 ? N - 1 : idx; out[j] = x[idx];
     }
   }
+  function gaussSolve(M, rhs, k){
+    for (let c = 0; c < k; c++){
+      let piv = c; for (let r = c + 1; r < k; r++) if (Math.abs(M[r * k + c]) > Math.abs(M[piv * k + c])) piv = r;
+      if (piv !== c){ for (let j = 0; j < k; j++){ const a = M[c * k + j]; M[c * k + j] = M[piv * k + j]; M[piv * k + j] = a; } const a = rhs[c]; rhs[c] = rhs[piv]; rhs[piv] = a; }
+      const d = M[c * k + c];
+      for (let r = c + 1; r < k; r++){ const f = M[r * k + c] / d; if (f !== 0){ for (let j = c; j < k; j++) M[r * k + j] -= f * M[c * k + j]; rhs[r] -= f * rhs[c]; } }
+    }
+    const x = new Float64Array(k);
+    for (let c = k - 1; c >= 0; c--){ let v = rhs[c]; for (let j = c + 1; j < k; j++) v -= M[c * k + j] * x[j]; x[c] = v / M[c * k + c]; }
+    return x;
+  }
   function train(pairs, taps, epochs, l2, smooth){
-    const rows = [], ys = [];
+    const rows = [], ys = [], sw = [];
     const tmp = new Float64Array(taps);
-    for (const [x, t] of pairs) for (let n = 0; n < N; n++){
+    for (const [x, t, wt] of pairs) for (let n = 0; n < N; n++){
       if (Number.isNaN(t[n])) continue;
-      convRow(x, taps, n, tmp); rows.push(Float64Array.from(tmp)); ys.push(t[n]);
+      convRow(x, taps, n, tmp); rows.push(Float64Array.from(tmp)); ys.push(t[n]); sw.push(wt);
     }
     const m = ys.length, half = taps >> 1;
+    const mw = sw.reduce((a, c) => a + c, 0) / m; for (let i = 0; i < m; i++) sw[i] /= mw;   // mean-1 sample weights
     const A = new Float64Array(m * taps); rows.forEach((r, i) => A.set(r, i * taps));
     const w = new Float64Array(taps);
     for (let i = 0; i < taps; i++){ const r = half ? Math.abs(i - half) / half : 0; w[i] = l2 * (1 + 200 * r ** 4); }
+    if (epochs === 0){            // exact minimiser of the same weighted-ridge + smoothness objective
+      const k = taps + 1, M = new Float64Array(k * k), rhs = new Float64Array(k);
+      for (let r = 0; r < m; r++){
+        const o = r * taps, wr = sw[r] / m;
+        for (let i = 0; i < taps; i++){ const ai = A[o + i] * wr; for (let j = 0; j < taps; j++) M[i * k + j] += ai * A[o + j]; M[i * k + taps] += ai; M[taps * k + i] += ai; rhs[i] += ai * ys[r]; }
+        M[taps * k + taps] += wr; rhs[taps] += wr * ys[r];
+      }
+      for (let i = 0; i < taps; i++) M[i * k + i] += w[i];
+      const cf = [1, -2, 1];
+      for (let i = 0; i + 2 < taps; i++) for (let p = 0; p < 3; p++) for (let q = 0; q < 3; q++) M[(i + p) * k + (i + q)] += smooth * cf[p] * cf[q];
+      M[taps * k + taps] += 1e-9;
+      const sol = gaussSolve(M, rhs, k), hh = sol.slice(0, taps), bb = sol[taps]; let se0 = 0;
+      for (let r = 0; r < m; r++){ let s = bb; const o = r * taps; for (let j = 0; j < taps; j++) s += A[o + j] * hh[j]; se0 += (s - ys[r]) ** 2; }
+      return { h: hh, b: bb, rmse: Math.sqrt(se0 / m) };
+    }
     const h = new Float64Array(taps); h[half] = 0.5; let b = 0;
     const mh = new Float64Array(taps), vh = new Float64Array(taps), gh = new Float64Array(taps), err = new Float64Array(m);
     let mb = 0, vb = 0;
@@ -189,9 +239,9 @@ const JSEngine = (() => {
       for (let r = 0; r < m; r++){ let s = b; const o = r * taps; for (let j = 0; j < taps; j++) s += A[o + j] * h[j]; err[r] = s - ys[r]; }
       for (let j = 0; j < taps; j++) gh[j] = w[j] * h[j];
       const invm = 1 / m;
-      for (let r = 0; r < m; r++){ const e = err[r] * invm, o = r * taps; for (let j = 0; j < taps; j++) gh[j] += A[o + j] * e; }
+      for (let r = 0; r < m; r++){ const e = err[r] * sw[r] * invm, o = r * taps; for (let j = 0; j < taps; j++) gh[j] += A[o + j] * e; }
       for (let i = 0; i + 2 < taps; i++){ const d = smooth * (h[i] - 2 * h[i + 1] + h[i + 2]); gh[i] += d; gh[i + 1] -= 2 * d; gh[i + 2] += d; }
-      let gb = 0; for (let r = 0; r < m; r++) gb += err[r]; gb *= invm;
+      let gb = 0; for (let r = 0; r < m; r++) gb += err[r] * sw[r]; gb *= invm;
       const c1 = 1 - b1 ** t, c2 = 1 - b2 ** t;
       for (let j = 0; j < taps; j++){
         mh[j] = b1 * mh[j] + (1 - b1) * gh[j]; vh[j] = b2 * vh[j] + (1 - b2) * gh[j] * gh[j];
@@ -209,13 +259,13 @@ const JSEngine = (() => {
     for (let n = 0; n < N; n++){ convRow(x, taps, n, row); let s = b; for (let j = 0; j < taps; j++) s += row[j] * h[j]; out[n] = s; }
     return out;
   }
-  function run(taps, epochs, l2, smooth, cur){
+  function run(taps, epochs, l2, smooth, cur, gamma){
     taps = Math.max(3, Math.min(MAXT, taps)); if (taps % 2 === 0) taps++;
     cur = Math.max(2, Math.min(3, cur));
     const c = [0, 1, 2, 3].map(k => SIG.subarray(k * N, (k + 1) * N));
     let iLast = 0; for (let i = N - 1; i >= 0; i--) if (!Number.isNaN(c[cur][i])){ iLast = i; break; }
     const vpairs = [], fpairs = [];
-    for (let j = 0; j < cur; j++){ fpairs.push([c[j], c[j + 1]]); if (j < cur - 1) vpairs.push([c[j], c[j + 1]]); }
+    for (let j = 0; j < cur; j++){ fpairs.push([c[j], c[j + 1], gamma ** (cur - 1 - j)]); if (j < cur - 1) vpairs.push([c[j], c[j + 1], gamma ** (cur - 2 - j)]); }
     const v = train(vpairs, taps, epochs, l2, smooth);
     const vp = apply(c[cur - 1], v.h, v.b); let se = 0, cnt = 0;
     for (let i = 0; i < N; i++) if (!Number.isNaN(c[cur][i])){ se += (vp[i] - c[cur][i]) ** 2; cnt++; }
@@ -235,8 +285,8 @@ async function loadWasm(){
   const { instance } = await WebAssembly.instantiate(await resp.arrayBuffer(), {});
   const x = instance.exports, mem = () => x.memory.buffer;
   new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG);
-  return { setSig(){ new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG); }, run(taps, epochs, l2, smooth, cur){
-    x.run(taps, epochs, l2, smooth, cur);
+  return { setSig(){ new Float64Array(mem(), x.sig_ptr(), 4 * N).set(SIG); }, run(taps, epochs, l2, smooth, cur, gamma){
+    x.run(taps, epochs, l2, smooth, cur, gamma);
     const st = new Float64Array(mem(), x.stats_ptr(), 8), t = st[5];
     return { h: Float64Array.from(new Float64Array(mem(), x.h_ptr(), t)),
       proj: Float64Array.from(new Float64Array(mem(), x.proj_ptr(), N)),
@@ -246,7 +296,7 @@ async function loadWasm(){
 
 /* ---------- UI ---------- */
 const $ = id => document.getElementById(id);
-let engine = JSEngine, state = { taps: 41, asOf: lastDate(), cur: 3 };
+let engine = JSEngine;
 const TMIN = 3, TMAX = 101;
 const fmtUsd = v => '$' + Math.round(v).toLocaleString('en-US');
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -272,13 +322,13 @@ function bandQ(taps, h){
   return out;
 }
 function zoomSeries(res){
-  const tL = state.asOf, tA = tL - 30 * DAY, tB = tL + 60 * DAY, base = BASES[res.cur];
+  const tL = state.asOf, tA = tL - 30 * DAY, tB = tL + 60 * DAY;
   const px = t => PX.p[Math.round((t - PX.t0) / DAY)];
-  const off = Math.log(px(tL) / base) - projLog(res, tL);
+  const pL = px(tL), p0L = projLog(res, tL);
   const act = [], pr = [], real = [];
   for (let t = tA; t <= tL; t += DAY) act.push([t, px(t)]);
   for (let t = tL; t <= tB; t += DAY){
-    const v = base * Math.exp(projLog(res, t) + off), q = bandQ(res.taps, (t - tL) / DAY);
+    const v = pL * Math.exp(projLog(res, t) - p0L), q = bandQ(res.taps, (t - tL) / DAY);
     pr.push([t, v, v * Math.exp(q.q05), v * Math.exp(q.q25), v * Math.exp(q.q75), v * Math.exp(q.q95)]);
     if (t <= lastDate()) real.push([t, px(t)]);
   }
@@ -330,13 +380,13 @@ function draw(res){
 }
 
 function readout(res, ms){
-  const { act, pr, real } = zoomSeries(res), p0 = act[act.length - 1][1], end = pr[pr.length - 1], p60 = end[1], base = BASES[res.cur];
+  const { act, pr, real } = zoomSeries(res), p0 = act[act.length - 1][1], end = pr[pr.length - 1], p60 = end[1], pL = PX.p[Math.round((state.asOf - PX.t0) / DAY)], dH = res.proj[N - 1] - projLog(res, state.asOf);
   $('s60').textContent = fmtUsd(p60);
   $('s60b').textContent = (p60 >= p0 ? '+' : '') + ((p60 / p0 - 1) * 100).toFixed(1) + '% · 50%: ' + fmtUsd(end[3]) + '–' + fmtUsd(end[4]) + ' · 90%: ' + fmtUsd(end[2]) + '–' + fmtUsd(end[5]);
   const rl = real[real.length - 1];
   $('s60c').textContent = real.length > 1 ? 'actual by ' + dfmt(rl[0]) + ': ' + fmtUsd(rl[1]) + ' (' + (rl[1] >= p0 ? '+' : '') + ((rl[1] / p0 - 1) * 100).toFixed(1) + '%)' : '';
-  $('sPrice').textContent = fmtUsd(base * Math.exp(res.proj[N - 1]));
-  $('sBand').textContent = fmtUsd(base * Math.exp(res.proj[N - 1] - res.valRmse)) + ' – ' + fmtUsd(base * Math.exp(res.proj[N - 1] + res.valRmse));
+  $('sPrice').textContent = fmtUsd(pL * Math.exp(dH));
+  $('sBand').textContent = fmtUsd(pL * Math.exp(dH - res.valRmse)) + ' – ' + fmtUsd(pL * Math.exp(dH + res.valRmse));
   const tr = trendSignal(res), TT = trendTable(res.taps), flat = Math.abs(tr.pred) < 0.03, up = tr.pred >= 0;
   $('sTrend').textContent = flat ? '◆ Flat ' + pct(tr.pred) : (up ? '▲ Up ' : '▼ Down ') + pct(tr.pred);
   $('sTrend').style.color = flat ? 'var(--mute)' : up ? 'var(--good)' : 'var(--bad)';
@@ -356,11 +406,11 @@ let last = null, timer = null, playing = false;
 const iso = ms => new Date(ms).toISOString().slice(0, 10);
 function compute(epochs){
   const t0 = performance.now();
-  last = engine.run(state.taps, epochs, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value), state.cur);
+  last = engine.run(state.taps, 0, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value), state.cur, state.gamma);
   last.cur = state.cur;
   readout(last, performance.now() - t0); draw(last); drawStrip(); drawTrend(last);
 }
-function schedule(){ clearTimeout(timer); compute(900); timer = setTimeout(() => compute(5000), 220); }
+function schedule(){ clearTimeout(timer); compute(0); }
 
 const trendTable = taps => { const T = DATA.trend.taps, ks = Object.keys(T).map(Number); return T[ks.reduce((a, c) => Math.abs(c - taps) < Math.abs(a - taps) ? c : a)]; };
 const pct = v => (v >= 0 ? '+' : '') + ((Math.exp(v) - 1) * 100).toFixed(0) + '%';
@@ -459,7 +509,9 @@ function setTaps(v){ v = Math.round((Math.max(TMIN, Math.min(TMAX, v)) - 1) / 2)
     if (e.key === 'Home'){ e.preventDefault(); setTaps(TMIN); } if (e.key === 'End'){ e.preventDefault(); setTaps(TMAX); }
   });
 })();
-function sliders(){ $('smV').textContent = (10 ** $('smooth').value).toPrecision(2); $('l2V').textContent = (10 ** $('l2').value).toExponential(0); }
+function sliders(){ $('gmV').textContent = state.gamma.toFixed(2); $('clV').textContent = state.clip >= 6 ? 'off' : state.clip.toFixed(1) + 'σ'; $('smV').textContent = (10 ** $('smooth').value).toPrecision(2); $('l2V').textContent = (10 ** $('l2').value).toExponential(0); }
+$('gamma').addEventListener('input', e => { state.gamma = +e.target.value; sliders(); schedule(); });
+$('clip').addEventListener('input', e => { state.clip = +e.target.value; sliders(); refreshSignals(state.asOf); engine.setSig && engine.setSig(); schedule(); });
 ['smooth', 'l2'].forEach(id => $(id).addEventListener('input', () => { sliders(); schedule(); }));
 addEventListener('resize', () => { if (last){ draw(last); drawStrip(); drawTrend(last); } });
 
