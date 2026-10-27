@@ -10,6 +10,7 @@ import backtest as b
 
 H = 90
 TAPS = [21, 41, 61, 81]
+WARMUP = {2: 120, 3: 30}   # days of the current cycle observed before testing starts
 
 
 def main(path):
@@ -19,7 +20,7 @@ def main(path):
         D, P, R = [], [], []
         for k in (2, 3):
             s, e = b.HAL[k], b.HAL[k + 1]
-            t = b.HAL[k] + pd.Timedelta(days=b.MIN_OBS_DAYS)
+            t = b.HAL[k] + pd.Timedelta(days=WARMUP[k])
             while t + pd.Timedelta(days=H) <= min(last, e):
                 sigs = [b.cycle_signal(p, j, t) for j in range(k + 1)]
                 h_, b_ = b.fit([(sigs[j], sigs[j + 1]) for j in range(k)], taps)

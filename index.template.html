@@ -112,7 +112,7 @@
       <div class="foot" id="foot"></div>
     </div>
   </div>
-  <div class="foot">Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), calibrated on this same history, not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare when online.</div>
+  <div class="foot">Bands are the historical walk-forward backtest errors of this model at each horizon (265 test dates, heavily overlapping), calibrated on this same history, not a probability guarantee. Pattern-matching on three cycles; not investment advice. Data: Coin Metrics open dataset (GitHub), topped up to today from CryptoCompare, Kraken or Coinbase when online.</div>
 </div>
 
 <script>
@@ -141,18 +141,25 @@ function refreshSignals(cutoff = lastDate()){
     }
   }
 }
+const day0 = ms => Math.floor(ms / DAY) * DAY;
+const SOURCES = [
+  ['CryptoCompare', async () => (await (await fetch('https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=400')).json()).Data.Data.map(r => [day0(r.time * 1000), r.close])],
+  ['Kraken', async () => { const j = await (await fetch('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1440')).json(); return Object.values(j.result).find(Array.isArray).map(r => [day0(r[0] * 1000), parseFloat(r[4])]); }],
+  ['Coinbase', async () => (await (await fetch('https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=86400')).json()).map(r => [day0(r[0] * 1000), r[4]])],
+];
 async function fetchLatest(){
-  try {
-    const r = await fetch('https://min-api.cryptocompare.com/data/v2/histoday?fsym=BTC&tsym=USD&limit=400');
-    const rows = (await r.json()).Data.Data.filter(d => d.close > 0);
-    const last = lastDate(), map = new Map();
-    rows.forEach(d => { const t = Math.floor(d.time * 1000 / DAY) * DAY; if (t > last) map.set(t, d.close); });
-    if (!map.size) return false;
-    const tEnd = Math.max(...map.keys()), n = Math.round((tEnd - PX.t0) / DAY) + 1, p = new Float64Array(n);
-    p.set(PX.p); let prev = PX.p[PX.p.length - 1];
-    for (let i = PX.p.length; i < n; i++){ const t = PX.t0 + i * DAY; prev = map.has(t) ? map.get(t) : prev; p[i] = prev; }
-    PX = { t0: PX.t0, p }; return true;
-  } catch (e) { return false; }
+  for (const [name, get] of SOURCES){
+    try {
+      const last = lastDate(), map = new Map();
+      (await get()).forEach(([t, c]) => { if (c > 0 && t > last) map.set(t, c); });
+      if (!map.size) continue;
+      const tEnd = Math.max(...map.keys()), n = Math.round((tEnd - PX.t0) / DAY) + 1, p = new Float64Array(n);
+      p.set(PX.p); let prev = PX.p[PX.p.length - 1];
+      for (let i = PX.p.length; i < n; i++){ const t = PX.t0 + i * DAY; prev = map.has(t) ? map.get(t) : prev; p[i] = prev; }
+      PX = { t0: PX.t0, p }; state.src = name; return true;
+    } catch (e) { /* try the next source */ }
+  }
+  return false;
 }
 
 /* ---------- JS engine (same algorithm as src/lib.rs) ---------- */
@@ -340,7 +347,7 @@ function readout(res, ms){
   $('sVal').textContent = '±' + Math.round((Math.exp(res.valRmse) - 1) * 100) + '%';
   $('sTime').textContent = 'retrained in ' + Math.round(ms) + ' ms';
   const atNow = state.asOf >= lastDate();
-  $('foot').textContent = (atNow ? 'Data through ' + new Date(lastDate()).toISOString().slice(0, 10) + (state.live ? ' (live)' : ' (embedded snapshot; live fetch unavailable)')
+  $('foot').textContent = (atNow ? 'Data through ' + new Date(lastDate()).toISOString().slice(0, 10) + (state.live ? ' (live · ' + state.src + ')' : ' (embedded snapshot; live price fetch failed, last known price May 23)')
       : 'Time travel: the filter only sees data up to ' + new Date(state.asOf).toISOString().slice(0, 10)) +
     ' · Cycle ' + (res.cur + 1) + ' observed ' + Math.round(res.iLast / (N - 1) * 100) + '% · filter spans ±' + Math.round((res.taps >> 1) * td() / N) + ' days';
 }
