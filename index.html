@@ -21,6 +21,7 @@
   .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute);margin-left:8px;vertical-align:middle}
   .badge.rust{color:var(--good);border-color:var(--good)}
   .grid{display:grid;grid-template-columns:240px 1fr;gap:14px}
+  .grid>*{min-width:0}
   @media (max-width:820px){.grid{grid-template-columns:1fr}}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
   .knobbox{display:flex;flex-direction:column;align-items:center;gap:6px}
@@ -51,12 +52,40 @@
   .foot{color:var(--mute);font-size:12px;margin-top:12px}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--mute);margin:0 0 6px}
   .legend i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
+  .head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+  .spot{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;min-width:220px;margin-bottom:14px}
+  .spot .k{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em;display:flex;align-items:center;gap:6px}
+  .spot .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.2}
+  .spot .s{font-size:12px;color:var(--mute);font-variant-numeric:tabular-nums}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--mute);display:inline-block}
+  .dot.on{background:var(--good);animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  @media (prefers-reduced-motion: reduce){.dot.on{animation:none}}
+  .opt{margin-top:22px;border-top:1px solid var(--line);padding-top:16px}
+  .opt h3{margin:0 0 8px;font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+  .btn{width:100%;background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 10px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+  .btn:disabled{opacity:.55;cursor:default}
+  .btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line);margin-top:6px}
+  .prog{height:4px;background:var(--line);border-radius:2px;margin-top:8px;overflow:hidden;display:none}
+  .prog i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+  #optChart{height:96px;margin-top:10px;display:none}
+  .optres{font-size:12px;margin-top:8px;line-height:1.5}
+  .optres b{font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>BTC Cycle Filter <span id="badge" class="badge">loading…</span></h1>
-  <div class="sub">A learned FIR filter maps each halving cycle onto the next. Turn the dial to change the number of taps; the filter retrains live.</div>
+  <div class="head">
+    <div>
+      <h1>BTC Cycle Filter <span id="badge" class="badge">loading…</span></h1>
+      <div class="sub">A learned FIR filter maps each halving cycle onto the next. Turn the dial to change the number of taps; the filter retrains live.</div>
+    </div>
+    <div class="spot" aria-live="polite">
+      <div class="k"><span class="dot" id="spotDot"></span>Current price · BTC/USD</div>
+      <div class="v" id="spotV">–</div>
+      <div class="s" id="spotS">connecting…</div>
+    </div>
+  </div>
 
   <div class="stats">
     <div class="stat"><div class="k">90-day trend</div><div class="v" id="sTrend">–</div><div class="s" id="sTrendB">–</div><div class="s" id="sTrendC"></div></div>
@@ -89,6 +118,14 @@
       <div class="ctl"><label><span>Shock clip <small>(σ, max = off)</small></span><span id="clV"></span></label>
         <input id="clip" type="range" min="2" max="6" step="0.5" value="2.5"></div>
       <div class="foot">Drag, scroll, or use ←/→ on the dial.</div>
+      <div class="opt">
+        <h3>Tap optimizer</h3>
+        <button class="btn" id="bOpt">Find best taps</button>
+        <div class="prog" id="optProg"><i></i></div>
+        <canvas id="optChart"></canvas>
+        <div class="optres" id="optRes"></div>
+        <button class="btn ghost" id="bOptUndo" style="display:none">Back to previous taps</button>
+      </div>
     </div>
 
     <div class="panel">
@@ -362,6 +399,12 @@ function draw(res){
   if (real.length > 1){ g.strokeStyle = css('--text'); g.globalAlpha = 0.6; g.lineWidth = 2.2; g.beginPath(); real.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke(); g.globalAlpha = 1; }
   const [te, ve] = pr[pr.length - 1]; g.fillStyle = acc; g.beginPath(); g.arc(X(te), Y(ve), 4, 0, 7); g.fill();
   g.textAlign = 'left'; g.fillText('$' + Math.round(ve / 100) / 10 + 'k', X(te) + 7, Y(ve) + 4);
+  if (SPOT && SPOT.t >= tA && SPOT.t <= tB && SPOT.p > lo && SPOT.p < hi){   // live price marker
+    const xs = X(SPOT.t), ys = Y(SPOT.p), good = css('--good');
+    g.strokeStyle = good; g.globalAlpha = 0.5; g.setLineDash([2, 3]); g.lineWidth = 1; g.beginPath(); g.moveTo(L, ys); g.lineTo(W - R, ys); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    g.fillStyle = good; g.beginPath(); g.arc(xs, ys, 4.5, 0, 7); g.fill();
+    g.textAlign = 'left'; g.fillText('now ' + fmtUsd(SPOT.p), Math.min(xs + 8, W - R - 80), ys - 7);
+  }
 
   // impulse response
   [g, W, H] = setupCanvas($('imp'));
@@ -524,6 +567,104 @@ $('bPlay').onclick = async () => {
   const done = playing; playing = false; $('bPlay').textContent = '▶ Play'; compute(5000);
 };
 
+/* ---------- current price ---------- */
+let SPOT = null;
+const SPOT_SOURCES = [
+  ['Coinbase', async () => { const s = await (await fetch('https://api.exchange.coinbase.com/products/BTC-USD/stats')).json(); return { p: +s.last, o: +s.open }; }],
+  ['Kraken', async () => { const j = await (await fetch('https://api.kraken.com/0/public/Ticker?pair=XBTUSD')).json(); const r = Object.values(j.result)[0]; return { p: +r.c[0], o: +r.o }; }],
+  ['CryptoCompare', async () => { const r = (await (await fetch('https://min-api.cryptocompare.com/data/pricemultifull?fsyms=BTC&tsyms=USD')).json()).RAW.BTC.USD; return { p: +r.PRICE, o: +r.OPEN24HOUR }; }],
+];
+async function updateSpot(){
+  for (const [name, get] of SPOT_SOURCES){
+    try {
+      const q = await get(); if (!(q.p > 0)) continue;
+      SPOT = { p: q.p, o: q.o, t: Date.now(), src: name };
+      const ch = q.o > 0 ? q.p / q.o - 1 : null;
+      $('spotV').textContent = fmtUsd(q.p);
+      $('spotS').innerHTML = (ch === null ? '' : '<span style="color:var(' + (ch >= 0 ? '--good' : '--bad') + ')">' + (ch >= 0 ? '▲ +' : '▼ ') + (ch * 100).toFixed(2) + '% 24h</span> · ') +
+        name + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      $('spotDot').classList.add('on');
+      if (last) draw(last);
+      return;
+    } catch (e) { /* next source */ }
+  }
+  $('spotDot').classList.remove('on');
+  $('spotS').textContent = SPOT ? 'stale · last update ' + new Date(SPOT.t).toLocaleTimeString() : 'live price unavailable';
+}
+
+/* ---------- tap optimizer ----------
+   For every candidate tap count, replay the walk-forward 90-day track record (weekly dates in Cycles 3 and 4,
+   model refit each date on data up to that date only).  Scored on dates where the model itself makes the call
+   (fill-in dates are identical for every tap count).  Picking the best tap after seeing all results is itself
+   in-sample, so we also run an honest version: on each date, use the tap count that had the best record on
+   outcomes already known by that date, and score that. */
+const OPT_TAPS = [3, 5, 7, 9, 11, 13, 15, 17, 21, 25, 31, 41, 51, 61, 71, 81, 101];
+let OPT = null, optRunning = false;
+async function runOptimizer(){
+  if (optRunning) return; optRunning = true;
+  const btn = $('bOpt'), bar = $('optProg'), fill = bar.firstElementChild;
+  btn.disabled = true; btn.textContent = 'Backtesting tap counts…'; bar.style.display = 'block'; $('optRes').textContent = '';
+  const l2 = 10 ** parseFloat($('l2').value), sm = 10 ** parseFloat($('smooth').value), gamma = state.gamma, clip = state.clip;
+  const dates = [];
+  for (const k of [2, 3]) for (let t = HAL[k]; t + 90 * DAY <= lastDate() && t < HAL[k + 1]; t += 7 * DAY) dates.push([t, k]);
+  const buf = new Float64Array(4 * N), D = [], R = [], P = OPT_TAPS.map(() => []);
+  const t0 = performance.now(); let tick = performance.now();
+  for (let i = 0; i < dates.length; i++){
+    const [t, k] = dates[i];
+    if (Math.round((t - HAL[k]) / DAY) < WARMUP[k] || t + 90 * DAY > HAL[k + 1]) continue;   // model-made calls only
+    refreshSignals(t, buf);
+    OPT_TAPS.forEach((tp, j) => { const res = engine.run(tp, 0, l2, sm, k, gamma, buf); res.cur = k; P[j].push(trendPred(res, t, k).v); });
+    D.push(t); R.push(lrAt(t, t + 90 * DAY));
+    if (performance.now() - tick > 40){ fill.style.width = (100 * (i + 1) / dates.length).toFixed(0) + '%'; await new Promise(r => setTimeout(r, 0)); tick = performance.now(); }
+  }
+  refreshSignals(state.asOf); engine.setSig && engine.setSig();
+  const n = D.length, right = (j, i) => Math.sign(P[j][i]) === Math.sign(R[i]);
+  const hits = OPT_TAPS.map((_, j) => { let h = 0; for (let i = 0; i < n; i++) h += right(j, i); return h / n; });
+  const mse = OPT_TAPS.map((_, j) => { let s = 0; for (let i = 0; i < n; i++) s += (P[j][i] - R[i]) ** 2; return s / n; });
+  const better = (a, b) => hits[a] > hits[b] + 1e-9 || (Math.abs(hits[a] - hits[b]) < 1e-9 && mse[a] < mse[b]);
+  let best = 0; OPT_TAPS.forEach((_, j) => { if (better(j, best)) best = j; });
+  // honest check: choose the tap count on each date using only outcomes known by then
+  const MINKNOWN = 12; let hh = 0, hn = 0; const picks = [];
+  for (let i = 0; i < n; i++){
+    const known = []; for (let m = 0; m < i; m++) if (D[m] + 90 * DAY <= D[i]) known.push(m);
+    if (known.length < MINKNOWN) continue;
+    let bj = 0, bs = -1, be = Infinity;
+    OPT_TAPS.forEach((_, j) => { let h = 0, e = 0; known.forEach(m => { h += right(j, m); e += (P[j][m] - R[m]) ** 2; }); if (h > bs || (h === bs && e < be)){ bs = h; bj = j; be = e; } });
+    hh += right(bj, i); hn++; picks.push(OPT_TAPS[bj]);
+  }
+  const jCur = OPT_TAPS.indexOf(state.taps), up = R.filter(v => v > 0).length / n;
+  let curHit = null;
+  if (jCur >= 0) curHit = hits[jCur];
+  OPT = { hits, best, n, honest: hn ? hh / hn : null, hn, up, picks, prev: state.taps, curHit, settings: [gamma, clip, l2, sm].join('|'), secs: (performance.now() - t0) / 1000 };
+  bar.style.display = 'none'; fill.style.width = '0'; btn.disabled = false; btn.textContent = 'Re-run optimizer'; optRunning = false;
+  drawOpt(); setTaps(OPT_TAPS[best]);
+  $('bOptUndo').style.display = OPT.prev !== OPT_TAPS[best] ? 'block' : 'none'; $('bOptUndo').textContent = 'Back to ' + OPT.prev + ' taps';
+}
+function drawOpt(){
+  if (!OPT) return;
+  const c = $('optChart'); c.style.display = 'block';
+  const [g, W, H] = setupCanvas(c), L = 4, R = 4, T = 14, B = 14, pw = W - L - R, ph = H - T - B, k = OPT_TAPS.length;
+  const lo = Math.min(0.45, ...OPT.hits) - 0.02, hi = Math.max(...OPT.hits) + 0.02, bw = pw / k;
+  const Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
+  g.clearRect(0, 0, W, H); g.font = '10px system-ui';
+  g.strokeStyle = css('--mute'); g.setLineDash([3, 3]); g.lineWidth = 1; g.beginPath(); g.moveTo(L, Y(Math.max(OPT.up, 1 - OPT.up))); g.lineTo(W - R, Y(Math.max(OPT.up, 1 - OPT.up))); g.stroke(); g.setLineDash([]);
+  OPT.hits.forEach((h, j) => {
+    const sel = OPT_TAPS[j] === state.taps;
+    g.fillStyle = j === OPT.best ? css('--good') : sel ? css('--accent') : css('--g2');
+    g.fillRect(L + j * bw + 1, Y(h), bw - 2, T + ph - Y(h));
+  });
+  g.fillStyle = css('--mute'); g.textAlign = 'center';
+  [0, OPT.best, k - 1].forEach(j => g.fillText(OPT_TAPS[j], L + (j + 0.5) * bw, H - 2));
+  g.textAlign = 'left'; g.fillText('direction right, by taps', L, 10);
+  const bh = OPT.hits[OPT.best], pc = v => Math.round(v * 100) + '%';
+  $('optRes').innerHTML = 'Best: <b>' + OPT_TAPS[OPT.best] + ' taps</b>, direction right <b>' + pc(bh) + '</b> of ' + OPT.n + ' model-made weekly calls' +
+    (OPT.curHit !== null && OPT.prev !== OPT_TAPS[OPT.best] ? ' (' + OPT.prev + ' taps: ' + pc(OPT.curHit) + ')' : '') + '. Always-up: ' + pc(Math.max(OPT.up, 1 - OPT.up)) + '.<br>' +
+    '<span style="color:var(--mute)">Picking the winner after the fact flatters it. Choosing taps each week from past results only scored <b style="color:var(--text)">' +
+    (OPT.honest === null ? 'n/a' : pc(OPT.honest)) + '</b> (' + OPT.hn + ' calls), the fairer estimate. Ran in ' + OPT.secs.toFixed(1) + ' s with the current sliders.</span>';
+}
+$('bOpt').onclick = runOptimizer;
+$('bOptUndo').onclick = () => { if (OPT){ setTaps(OPT.prev); $('bOptUndo').style.display = 'none'; drawOpt(); } };
+
 /* knob */
 const A0 = -135, A1 = 135;
 function polar(a, r){ const t = (a - 90) * Math.PI / 180; return [85 + r * Math.cos(t), 85 + r * Math.sin(t)]; }
@@ -557,12 +698,13 @@ function sliders(){ $('gmV').textContent = state.gamma.toFixed(2); $('clV').text
 $('gamma').addEventListener('input', e => { state.gamma = +e.target.value; sliders(); schedule(); });
 $('clip').addEventListener('input', e => { state.clip = +e.target.value; sliders(); refreshSignals(state.asOf); engine.setSig && engine.setSig(); schedule(); });
 ['smooth', 'l2'].forEach(id => $(id).addEventListener('input', () => { sliders(); schedule(); }));
-addEventListener('resize', () => { if (last){ draw(last); drawStrip(); drawTrend(last); } });
+addEventListener('resize', () => { if (last){ draw(last); drawStrip(); drawTrend(last); } drawOpt(); });
 
 (async () => {
   try { engine = await loadWasm(); $('badge').textContent = 'Rust · WebAssembly'; $('badge').classList.add('rust'); }
   catch (e) { $('badge').textContent = 'JavaScript engine (build fir.wasm for Rust)'; }
   sliders(); renderKnob(); refreshSignals(); engine.setSig && engine.setSig(); syncScrub(); compute(5000);
+  updateSpot(); setInterval(updateSpot, 30000);
   const wasNow = state.asOf >= lastDate();
   if (await fetchLatest()){ state.live = true; if (wasNow) state.asOf = lastDate(); goto(state.asOf, 5000); }
 })();
