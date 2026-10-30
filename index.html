@@ -33,8 +33,10 @@
   .ctl{margin-top:18px}
   .ctl label{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);margin-bottom:4px}
   .ctl input{width:100%;accent-color:var(--accent)}
-  .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
+  .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px}
+  @media (max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}}
   @media (max-width:820px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .tag{font-size:10px;border:1px solid var(--line);border-radius:99px;padding:0 6px;margin-left:4px;text-transform:none;letter-spacing:0}
   .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
   .stat .k{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em}
   .stat .v{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums}
@@ -93,6 +95,7 @@
     <div class="stat"><div class="k">Projected at halving</div><div class="v" id="sPrice">–</div><div class="s" id="sBand">–</div></div>
     <div class="stat"><div class="k">Filter gain</div><div class="v" id="sGain">–</div><div class="s">amplitude vs. prior cycle</div></div>
     <div class="stat"><div class="k">Cycle error (out-of-sample)</div><div class="v" id="sVal">–</div><div class="s" id="sTime">–</div></div>
+    <div class="stat" title="Frozen 2026-10-30: adjustment = w x standardised 90-day change in the dollar index, fitted once on the cycle filter's past 90-day misses. Not refit; tracked live from that date."><div class="k">Dollar check <span class="tag">experimental</span></div><div class="v" id="sDx">–</div><div class="s" id="sDxB">loading dollar data…</div><div class="s" id="sDxC"></div><div class="s" id="sDxD"></div></div>
   </div>
 
   <div class="grid">
@@ -437,6 +440,7 @@ function readout(res, ms){
   $('sTrendB').textContent = 'track record: direction right ' + Math.round(TT.hit * 100) + '% (always-up ' + Math.round(Math.max(TT.up, 1 - TT.up) * 100) + '%)';
   $('sTrendC').textContent = tr.actual === null ? 'outcome not known yet' : 'actual: ' + (tr.actual >= 0 ? '▲ ' : '▼ ') + pct(tr.actual) + (Math.sign(tr.actual) === Math.sign(tr.pred) ? '  ✓ right' : '  ✗ wrong');
   $('sTrendC').style.color = tr.actual === null ? '' : Math.sign(tr.actual) === Math.sign(tr.pred) ? 'var(--good)' : 'var(--bad)';
+  dollarReadout(tr.pred);
   $('sGain').textContent = res.gain.toFixed(2);
   $('sVal').textContent = '±' + Math.round((Math.exp(res.valRmse) - 1) * 100) + '%';
   $('sTime').textContent = 'retrained in ' + Math.round(ms) + ' ms';
@@ -502,6 +506,42 @@ function drawTrend(res){
     Math.round(T.hit * 100) + '% of ' + T.n + ' weekly dates (always-up: ' + Math.round(Math.max(T.up, 1 - T.up) * 100) + '%). Ring = the selected date\'s prediction. Grey ticks along the top = dates where the cycle can\'t be fit (the new cycle is too young, or the 90 days run past a halving), so the previous cycle\'s own curve is used for that stretch (direction right ' + (T.a ? Math.round(100 * T.d.filter((_, i) => T.a[i] && Math.sign(T.p[i]) === Math.sign(T.r[i])).length / Math.max(1, T.a.reduce((x, y) => x + y, 0))) + '%' : 'n/a') + ' there). Shaded: "outcome pending" = the last 90 days, whose result isn\'t known yet.' + (T.live ? ' Recomputed live for your current settings.' : ' Precomputed at the default settings.');
 }
 const WARMUP = { 2: 120, 3: 30 };
+/* ---------- dollar check (frozen 2026-10-30, see python/dollar_fit.py) ---------- */
+const DOLLAR = { mu: 0.0011017638913494792, sd: 0.034377752237836554, w: -0.05175578754896457, frozen: Date.UTC(2026, 9, 30) };
+let MK = null;   // { t0, v: Float64Array of DXY closes, forward-filled by calendar day }
+async function loadMarket(){
+  try {
+    const txt = await (await fetch('python/market.csv', { cache: 'no-cache' })).text();
+    const lines = txt.trim().split(/\r?\n/), hdr = lines[0].split(','), iD = hdr.indexOf('dxy'), iB = hdr.indexOf('dxy_broad');
+    const rows = [];
+    for (let i = 1; i < lines.length; i++){ const c = lines[i].split(','), v = parseFloat(c[iD]) || parseFloat(c[iB]); if (v > 0) rows.push([Date.parse(c[0] + 'T00:00:00Z'), v]); }
+    const t0 = rows[0][0], n = Math.round((rows[rows.length - 1][0] - t0) / DAY) + 1, v = new Float64Array(n);
+    let j = 0, prev = rows[0][1];
+    for (let i = 0; i < n; i++){ const t = t0 + i * DAY; while (j < rows.length && rows[j][0] <= t){ prev = rows[j][1]; j++; } v[i] = prev; }
+    MK = { t0, v, last: rows[rows.length - 1][0] };
+  } catch (e) { MK = false; }
+  if (last) readout(last, lastMs);
+}
+function dollarAt(ms){
+  if (!MK) return null;
+  const at = t => { const i = Math.round((Math.min(t, MK.t0 + (MK.v.length - 1) * DAY) - MK.t0) / DAY); return i >= 0 ? MK.v[i] : NaN; };
+  const a = at(ms - DAY), b = at(ms - 91 * DAY);
+  if (!(a > 0 && b > 0)) return null;
+  const dx = Math.log(a / b);
+  return { dx, adj: DOLLAR.w * (dx - DOLLAR.mu) / DOLLAR.sd };
+}
+function dollarReadout(pred){
+  if (MK === null){ return; }
+  if (MK === false){ $('sDxB').textContent = 'dollar data unavailable'; return; }
+  const d = dollarAt(state.asOf);
+  if (!d){ $('sDx').textContent = '–'; $('sDxB').textContent = 'no dollar data for this date'; $('sDxC').textContent = ''; $('sDxD').textContent = ''; return; }
+  const c = pred + d.adj, flat = Math.abs(c) < 0.03;
+  $('sDx').textContent = (d.adj >= 0 ? '+' : '') + ((Math.exp(d.adj) - 1) * 100).toFixed(1) + '%';
+  $('sDx').style.color = Math.abs(d.adj) < 0.01 ? 'var(--mute)' : d.adj > 0 ? 'var(--good)' : 'var(--bad)';
+  $('sDxB').textContent = 'DXY ' + (d.dx >= 0 ? '+' : '') + ((Math.exp(d.dx) - 1) * 100).toFixed(1) + '% over 90 days';
+  $('sDxC').textContent = '90-day call with dollar: ' + (flat ? '◆ Flat ' : c >= 0 ? '▲ ' : '▼ ') + pct(c);
+  $('sDxD').textContent = state.asOf < DOLLAR.frozen ? 'in-sample here (fitted on this history)' : 'live record since Oct 30, 2026';
+}
 function startTrack(){
   const key = [state.taps, state.gamma, state.clip, PX.p.length, $('l2').value, $('smooth').value].join('|');
   if (key === trackKey) return;
@@ -704,7 +744,7 @@ addEventListener('resize', () => { if (last){ draw(last); drawStrip(); drawTrend
   try { engine = await loadWasm(); $('badge').textContent = 'Rust · WebAssembly'; $('badge').classList.add('rust'); }
   catch (e) { $('badge').textContent = 'JavaScript engine (build fir.wasm for Rust)'; }
   sliders(); renderKnob(); refreshSignals(); engine.setSig && engine.setSig(); syncScrub(); compute(5000);
-  updateSpot(); setInterval(updateSpot, 30000);
+  updateSpot(); setInterval(updateSpot, 30000); loadMarket();
   const wasNow = state.asOf >= lastDate();
   if (await fetchLatest()){ state.live = true; if (wasNow) state.asOf = lastDate(); goto(state.asOf, 5000); }
 })();

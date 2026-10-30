@@ -14,10 +14,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install yfinance pandas
+      - run: pip install numpy
       - run: python python/fetch_market.py python/market.csv
+      - run: python python/live_track.py
       - name: Commit if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          git add python/market.csv
+          git add python/market.csv python/live_log.csv
           git diff --cached --quiet || (git commit -m "Update market data" && git push)
