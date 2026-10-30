@@ -580,8 +580,9 @@ async function runTrack(job, key){
 /* ---------- past top / bottom timing ----------
    Cycle top = highest close in the first 700 days after a halving; bottom = lowest close in the 500 days after
    that top.  Windows for a cycle use only the cycles completed before it, in days after the halving. */
-function cycleMarks(j){
-  const i0 = Math.round((HAL[j] - PX.t0) / DAY), iNext = Math.round((HAL[j + 1] - PX.t0) / DAY), iEnd = Math.min(iNext, PX.p.length - 1);
+function cycleMarks(j, cutMs = Infinity){
+  const i0 = Math.round((HAL[j] - PX.t0) / DAY), iNext = Math.round((HAL[j + 1] - PX.t0) / DAY);
+  const iEnd = Math.min(iNext, PX.p.length - 1, cutMs === Infinity ? Infinity : Math.round((cutMs - PX.t0) / DAY));
   if (iEnd <= i0) return null;
   let it = i0; for (let i = i0; i <= Math.min(i0 + 700, iEnd); i++) if (PX.p[i] > PX.p[it]) it = i;
   let ib = it; for (let i = it; i <= Math.min(it + 500, iEnd); i++) if (PX.p[i] < PX.p[ib]) ib = i;
@@ -593,16 +594,46 @@ function timingWindows(k){
   const win = key => { const ds = past.map(m => m[key]); return { a: HAL[k] + Math.min(...ds) * DAY, b: HAL[k] + Math.max(...ds) * DAY, days: ds }; };
   return { past, top: win('top'), bot: win('bot') };
 }
+/* Next cycle's top window: tops of every cycle up to and including this one, the current one only once its top is
+   at least 180 days old as of the selected date.  Core window = the three most recent; full = all of them. */
+function nextTopWindow(k){
+  const tops = [];
+  for (let j = 0; j <= k; j++){
+    const m = cycleMarks(j, state.asOf); if (!m) continue;
+    const iTop = Math.round((HAL[j] - PX.t0) / DAY) + m.top, iCut = Math.min(PX.p.length - 1, Math.round((state.asOf - PX.t0) / DAY));
+    if (m.done || (j === k && iCut - iTop >= 180)) tops.push({ j, d: m.top });
+  }
+  if (tops.length < 2) return null;
+  const core = tops.slice(-3), h = HAL[k + 1], ds = a_ => a_.map(t => t.d);
+  return { tops, h, full: { a: h + Math.min(...ds(tops)) * DAY, b: h + Math.max(...ds(tops)) * DAY }, core: { a: h + Math.min(...ds(core)) * DAY, b: h + Math.max(...ds(core)) * DAY } };
+}
 function drawCycle(){
   const k = state.cur, TW = timingWindows(k), cur = cycleMarks(k), [g, W, H] = setupCanvas($('cyc'));
-  const L = 54, R = 12, T = 22, B = 22, pw = W - L - R, ph = H - T - B, a = HAL[k], b = HAL[k + 1];
+  const NW = nextTopWindow(k);
+  const L = 54, R = 12, T = 22, B = 22, pw = W - L - R, ph = H - T - B, a = HAL[k], b = HAL[k + 1] + 640 * DAY;   // scaled out past the next halving
   const i0 = Math.round((a - PX.t0) / DAY), i1 = Math.min(Math.round((b - PX.t0) / DAY), PX.p.length - 1);
   let lo = Infinity, hi = -Infinity; for (let i = i0; i <= i1; i++){ lo = Math.min(lo, PX.p[i]); hi = Math.max(hi, PX.p[i]); }
   lo *= 0.85; hi *= 1.12;
   const X = t => L + (t - a) / (b - a) * pw, Y = v => T + (1 - Math.log(v / lo) / Math.log(hi / lo)) * ph;
   g.clearRect(0, 0, W, H); g.font = '11px system-ui';
   g.fillStyle = css('--mute'); g.textAlign = 'left';
-  g.fillText('Cycle ' + (k + 1) + ': where past cycles topped and bottomed (days after the halving)', L, 12);
+  g.fillText('Cycle ' + (k + 1) + ': where past cycles topped and bottomed (days after the halving), and the next top window', L, 12);
+  // next halving + next cycle's top window
+  { const xh = X(HAL[k + 1]); g.strokeStyle = css('--mute'); g.lineWidth = 1; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(xh, T); g.lineTo(xh, T + ph); g.stroke(); g.setLineDash([]);
+    g.fillStyle = css('--mute'); g.font = '10px system-ui'; g.textAlign = 'left'; g.fillText(HAL[k + 1] > lastDate() ? 'next halving (est.)' : 'halving', xh + 4, T + 10); g.font = '11px system-ui'; }
+  if (NW){
+    const col = css('--bad'), yb = T + ph - 8;
+    g.fillStyle = col + '14'; g.fillRect(X(NW.full.a), T, Math.max(2, X(NW.full.b) - X(NW.full.a)), ph);
+    g.fillStyle = col + '30'; g.fillRect(X(NW.core.a), T, Math.max(3, X(NW.core.b) - X(NW.core.a)), ph);
+    g.save(); g.strokeStyle = col; g.setLineDash([4, 3]); g.lineWidth = 1.2; g.strokeRect(X(NW.full.a), T, Math.max(2, X(NW.full.b) - X(NW.full.a)), ph); g.restore();
+    g.strokeStyle = col; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(X(NW.full.a), yb); g.lineTo(X(NW.full.b), yb); g.moveTo(X(NW.full.a), yb - 5); g.lineTo(X(NW.full.a), yb + 5); g.moveTo(X(NW.full.b), yb - 5); g.lineTo(X(NW.full.b), yb + 5); g.stroke();
+    let px = -1e9, lift = 0;
+    NW.tops.map(t => [t, X(NW.h + t.d * DAY)]).sort((u, v) => u[1] - v[1]).forEach(([t, x]) => {
+      lift = x - px < 16 ? lift + 10 : 0; px = x;
+      g.fillStyle = col; g.beginPath(); g.arc(x, yb, 3.2, 0, 7); g.fill(); g.font = '10px system-ui'; g.textAlign = 'center'; g.fillText('C' + (t.j + 1), x, yb - 8 - lift); g.font = '11px system-ui'; });
+    g.fillStyle = col; g.textAlign = 'center'; g.fillText('next top window', (X(NW.full.a) + X(NW.full.b)) / 2, T + 24);
+  }
   const band = (w, col, lab) => {
     if (!w) return;
     g.fillStyle = col + '22'; g.fillRect(X(w.a), T, Math.max(2, X(w.b) - X(w.a)), ph);
@@ -622,6 +653,10 @@ function drawCycle(){
   ticks.forEach(v => { g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke(); g.fillText('$' + (v >= 1e6 ? v / 1e6 + 'M' : v >= 1e3 ? v / 1e3 + 'k' : v), L - 6, Y(v) + 4); });
   g.textAlign = 'center';
   for (let y = new Date(a).getUTCFullYear(); y <= new Date(b).getUTCFullYear(); y++){ const t = Date.UTC(y, 0, 1); if (t > a && t < b) g.fillText(String(y), X(t), H - 6); }
+  if (NW){ const df = t => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+    $('cycNote').dataset.next = ' Next top window (C' + (k + 2) + '): ' + df(NW.core.a) + ' – ' + df(NW.core.b) + ' from the last three tops (' + NW.tops.slice(-3).map(t => 'C' + (t.j + 1) + ' ' + t.d).join(', ') +
+      ' days after the halving); ' + df(NW.full.a) + ' – ' + df(NW.full.b) + ' using every cycle (dashed). The next halving date is an estimate and can shift by a few weeks.'; }
+  else $('cycNote').dataset.next = '';
   // price: known up to as-of solid, after faded
   const iA = Math.min(i1, Math.round((state.asOf - PX.t0) / DAY));
   const path = (from, to) => { g.beginPath(); for (let i = from; i <= to; i++){ const x = X(PX.t0 + i * DAY), y = Y(PX.p[i]); i === from ? g.moveTo(x, y) : g.lineTo(x, y); } g.stroke(); };
@@ -643,7 +678,7 @@ function drawCycle(){
     const dd = arr => arr.map((d, i) => 'C' + (TW.past[i].j + 1) + ' ' + d).join(', ');
     $('cycNote').textContent = 'Past tops landed ' + dd(TW.top.days) + ' days after the halving (' + f(TW.top.a) + ' – ' + f(TW.top.b) + ' this cycle); past bottoms ' +
       dd(TW.bot.days) + ' days (' + f(TW.bot.a) + ' – ' + f(TW.bot.b) + '). Bars span the earliest to latest past cycle; dots are each cycle. ' +
-      'Only cycles completed before this one are used. Top = highest close in the first 700 days; bottom = lowest close in the 500 days after it.';
+      'Only cycles completed before this one are used. Top = highest close in the first 700 days; bottom = lowest close in the 500 days after it.' + ($('cycNote').dataset.next || '');
   } else $('cycNote').textContent = '';
 }
 function drawStrip(){
