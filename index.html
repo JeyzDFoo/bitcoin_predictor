@@ -630,7 +630,9 @@ function drawCycle(){
   // this cycle's top / low so far
   if (cur){
     const mk = (d, v, col, lab) => { const x = X(a + d * DAY), y = Y(v); g.strokeStyle = col; g.lineWidth = 2; g.fillStyle = css('--bg'); g.beginPath(); g.arc(x, y, 4.5, 0, 7); g.fill(); g.stroke();
-      g.fillStyle = col; g.textAlign = x > W - 140 ? 'right' : 'left'; g.fillText(lab, x + (x > W - 140 ? -8 : 8), y + (lab.startsWith('top') ? -6 : 14)); };
+      const right = x > W - 170, tx = x + (right ? -8 : 8), ty = y - 9, tw = g.measureText(lab).width;
+      g.fillStyle = css('--panel'); g.globalAlpha = 0.85; g.fillRect(right ? tx - tw - 3 : tx - 3, ty - 11, tw + 6, 15); g.globalAlpha = 1;   // label backing
+      g.fillStyle = col; g.textAlign = right ? 'right' : 'left'; g.fillText(lab, tx, ty); };
     mk(cur.top, cur.topP, css('--bad'), (cur.done ? 'top ' : 'top so far ') + fmtUsd(cur.topP));
     if (cur.bot > cur.top) mk(cur.bot, cur.botP, css('--good'), (cur.botFinal ? 'low ' : 'low so far ') + fmtUsd(cur.botP) + ' (' + Math.round((cur.botP / cur.topP - 1) * 100) + '%)');
   }
