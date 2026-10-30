@@ -607,13 +607,42 @@ function nextTopWindow(k){
   const core = tops.slice(-3), h = HAL[k + 1], ds = a_ => a_.map(t => t.d);
   return { tops, h, full: { a: h + Math.min(...ds(tops)) * DAY, b: h + Math.max(...ds(tops)) * DAY }, core: { a: h + Math.min(...ds(core)) * DAY, b: h + Math.max(...ds(core)) * DAY } };
 }
+/* ---------- speculation line (for fun, shown only at "Now") ----------
+   1) rest of this cycle: the filter's own projection, anchored to today's price
+   2) halving -> next top: average shape of the last three run-ups (each scaled 0..1 in log price and time), ending at
+      the core-window centre at a peak = this cycle's low x the next rally size, where each rally (prior cycle's low ->
+      top, in log terms) has been a steady fraction of the one before
+   3) after the top: the average post-top path of those cycles, scaled by rally size */
+function specPath(k){
+  if (!last || last.cur !== k || state.asOf < lastDate() || !(HAL[k + 1] > lastDate())) return null;
+  const cur = cycleMarks(k), NW = nextTopWindow(k); if (!cur || !(cur.bot > cur.top) || !NW) return null;
+  const M = []; for (let j = 0; j <= k; j++) M.push(cycleMarks(j));
+  const lr = {}; for (let j = 1; j <= k; j++) if (M[j] && M[j - 1]) lr[j] = Math.log(M[j].topP / M[j - 1].botP);
+  const js = Object.keys(lr).map(Number).sort((a_, b_) => a_ - b_), ratios = js.slice(1).map((j, i) => lr[j] / lr[js[i]]);
+  if (!ratios.length) return null;
+  const rr = ratios.reduce((a_, c) => a_ + c, 0) / ratios.length, lnR = lr[k] * rr, pTop = cur.botP * Math.exp(lnR);
+  const tops = NW.tops.slice(-3).filter(t => t.j >= 1 && lr[t.j] > 0), dTop = Math.round(tops.reduce((a_, t) => a_ + t.d, 0) / tops.length);
+  const S = 80, up = new Float64Array(S + 1), postDays = 640 - dTop, dn = new Float64Array(postDays + 1), cnt = new Float64Array(postDays + 1);
+  for (const tp of tops){
+    const i0 = Math.round((HAL[tp.j] - PX.t0) / DAY), it = i0 + tp.d, l0 = Math.log(PX.p[i0]), lt = Math.log(PX.p[it]);
+    for (let q = 0; q <= S; q++) up[q] += (Math.log(PX.p[i0 + Math.round(q / S * tp.d)]) - l0) / (lt - l0) / tops.length;
+    for (let d = 0; d <= postDays && it + d < PX.p.length; d++){ dn[d] += (Math.log(PX.p[it + d]) - lt) / lr[tp.j]; cnt[d]++; }
+  }
+  const tNow = lastDate(), pNow = PX.p[PX.p.length - 1], base = projLog(last, tNow), pts = [];
+  for (let t = tNow; t < HAL[k + 1]; t += 3 * DAY) pts.push([t, pNow * Math.exp(projLog(last, t) - base)]);
+  const tH = HAL[k + 1], lH = Math.log(pNow) + projLog(last, tH) - base, lT = Math.log(pTop);
+  for (let q = 0; q <= S; q++) pts.push([tH + q / S * dTop * DAY, Math.exp(lH + up[q] * (lT - lH))]);
+  for (let d = 3; d <= postDays && cnt[d]; d += 3) pts.push([tH + (dTop + d) * DAY, Math.exp(lT + dn[d] / cnt[d] * lnR)]);
+  return { pts, pTop, tTop: tH + dTop * DAY, mult: Math.exp(lnR), low: cur.botP };
+}
 function drawCycle(){
   const k = state.cur, TW = timingWindows(k), cur = cycleMarks(k), [g, W, H] = setupCanvas($('cyc'));
   const NW = nextTopWindow(k);
   const L = 54, R = 12, T = 22, B = 22, pw = W - L - R, ph = H - T - B, a = HAL[k], b = HAL[k + 1] + 640 * DAY;   // scaled out past the next halving
   const i0 = Math.round((a - PX.t0) / DAY), i1 = Math.min(Math.round((b - PX.t0) / DAY), PX.p.length - 1);
   let lo = Infinity, hi = -Infinity; for (let i = i0; i <= i1; i++){ lo = Math.min(lo, PX.p[i]); hi = Math.max(hi, PX.p[i]); }
-  lo *= 0.85; hi *= 1.12;
+  const SP = specPath(k); if (SP) SP.pts.forEach(([, v]) => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+  lo *= 0.85; hi *= SP ? 1.45 : 1.12;
   const X = t => L + (t - a) / (b - a) * pw, Y = v => T + (1 - Math.log(v / lo) / Math.log(hi / lo)) * ph;
   g.clearRect(0, 0, W, H); g.font = '11px system-ui';
   g.fillStyle = css('--mute'); g.textAlign = 'left';
@@ -655,13 +684,23 @@ function drawCycle(){
   for (let y = new Date(a).getUTCFullYear(); y <= new Date(b).getUTCFullYear(); y++){ const t = Date.UTC(y, 0, 1); if (t > a && t < b) g.fillText(String(y), X(t), H - 6); }
   if (NW){ const df = t => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
     $('cycNote').dataset.next = ' Next top window (C' + (k + 2) + '): ' + df(NW.core.a) + ' – ' + df(NW.core.b) + ' from the last three tops (' + NW.tops.slice(-3).map(t => 'C' + (t.j + 1) + ' ' + t.d).join(', ') +
-      ' days after the halving); ' + df(NW.full.a) + ' – ' + df(NW.full.b) + ' using every cycle (dashed). The next halving date is an estimate and can shift by a few weeks.'; }
+      ' days after the halving); ' + df(NW.full.a) + ' – ' + df(NW.full.b) + ' using every cycle (dashed). The next halving date is an estimate and can shift by a few weeks.' +
+      (SP ? ' Dashed blue line = speculation, for fun, not a forecast: the filter\'s projection to the halving, then the average shape of the last three run-ups to a peak of about ' +
+        SP.mult.toFixed(1) + '× this cycle\'s ' + fmtUsd(SP.low) + ' low (each rally, low to top, has been roughly two-thirds the size of the one before in log terms), then the average fade after a top.' : ''); }
   else $('cycNote').dataset.next = '';
   // price: known up to as-of solid, after faded
   const iA = Math.min(i1, Math.round((state.asOf - PX.t0) / DAY));
   const path = (from, to) => { g.beginPath(); for (let i = from; i <= to; i++){ const x = X(PX.t0 + i * DAY), y = Y(PX.p[i]); i === from ? g.moveTo(x, y) : g.lineTo(x, y); } g.stroke(); };
   g.lineWidth = 1.8; g.strokeStyle = css('--g3'); path(i0, iA);
   if (i1 > iA){ g.globalAlpha = 0.4; path(iA, i1); g.globalAlpha = 1; }
+  if (SP){                                                                       // speculation: dashed, faded
+    g.save(); g.strokeStyle = css('--accent'); g.globalAlpha = 0.55; g.lineWidth = 1.6; g.setLineDash([5, 4]);
+    g.beginPath(); SP.pts.forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v))); g.stroke(); g.restore();
+    const xp = X(SP.tTop), yp = Y(SP.pTop), lab = 'speculation ≈ ' + fmtUsd(Math.round(SP.pTop / 1000) * 1000) + ' · ' + new Date(SP.tTop).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+    g.fillStyle = css('--accent'); g.globalAlpha = 0.85; g.beginPath(); g.arc(xp, yp, 3, 0, 7); g.fill();
+    const tw = g.measureText(lab).width; g.globalAlpha = 0.85; g.fillStyle = css('--panel'); g.fillRect(xp - 10 - tw, yp + 7, tw + 6, 15);
+    g.fillStyle = css('--accent'); g.textAlign = 'right'; g.fillText(lab, xp - 7, yp + 18); g.globalAlpha = 1;
+  }
   // this cycle's top / low so far
   if (cur){
     const mk = (d, v, col, lab) => { const x = X(a + d * DAY), y = Y(v); g.strokeStyle = col; g.lineWidth = 2; g.fillStyle = css('--bg'); g.beginPath(); g.arc(x, y, 4.5, 0, 7); g.fill(); g.stroke();
