@@ -42,7 +42,7 @@
   .stat .v{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums}
   .stat .s{font-size:12px;color:var(--mute)}
   canvas{width:100%;display:block}
-  #main{height:360px} #imp{height:150px;margin-top:10px}
+  #main{height:360px} #imp{height:150px;margin-top:10px} #cyc{height:230px;margin-top:14px}
   .scrub{display:flex;align-items:center;gap:8px;margin:0 0 6px}
   .scrub button{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font:inherit;font-size:13px;cursor:pointer}
   .scrub button:hover{border-color:var(--accent)}
@@ -148,8 +148,12 @@
         <span><i style="background:var(--accent)"></i>Next 60 days (projected)</span>
         <span><i style="background:var(--accent);opacity:.45;height:8px"></i>50% band</span>
         <span><i style="background:var(--accent);opacity:.18;height:8px"></i>90% band</span>
+        <span><i style="background:var(--bad);opacity:.35;height:8px"></i>Past tops</span>
+        <span><i style="background:var(--good);opacity:.35;height:8px"></i>Past bottoms</span>
       </div>
       <canvas id="main"></canvas>
+      <canvas id="cyc" aria-label="Current cycle with past top and bottom timing"></canvas>
+      <div class="foot" id="cycNote"></div>
       <canvas id="trend"></canvas>
       <div class="foot" id="trendNote"></div>
       <canvas id="imp"></canvas>
@@ -385,6 +389,12 @@ function draw(res){
   const X = t => L + (t - tA) / (tB - tA) * pw, Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
   g.clearRect(0, 0, W, H); g.font = '11px system-ui'; g.lineWidth = 1;
   g.fillStyle = acc + '10'; g.fillRect(X(tL), T, X(tB) - X(tL), ph);
+  const TW = timingWindows(state.cur);                  // past top / bottom timing, mapped onto this cycle
+  [[TW.top, css('--bad'), 'past tops'], [TW.bot, css('--good'), 'past bottoms']].forEach(([w, col, lab]) => {
+    if (!w) return; const a = Math.max(w.a, tA), b = Math.min(w.b, tB); if (b <= a) return;
+    g.fillStyle = col + '1c'; g.fillRect(X(a), T, X(b) - X(a), ph);
+    g.fillStyle = col; g.textAlign = 'center'; g.fillText(lab, (X(a) + X(b)) / 2, T + ph - 6);
+  });
   g.strokeStyle = css('--line'); g.fillStyle = css('--mute'); g.textAlign = 'right';
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step){
     g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke();
@@ -456,7 +466,7 @@ function compute(epochs){
   const t0 = performance.now();
   last = engine.run(state.taps, 0, 10 ** parseFloat($('l2').value), 10 ** parseFloat($('smooth').value), state.cur, state.gamma);
   last.cur = state.cur;
-  lastMs = performance.now() - t0; readout(last, lastMs); draw(last); drawStrip(); drawTrend(last); startTrack();
+  lastMs = performance.now() - t0; readout(last, lastMs); draw(last); drawStrip(); drawCycle(); drawTrend(last); startTrack();
 }
 function schedule(){ clearTimeout(timer); compute(0); }
 
@@ -566,6 +576,73 @@ async function runTrack(job, key){
   const n = d.length, hit = d.filter((_, i) => Math.sign(p[i]) === Math.sign(r[i])).length / n, up = r.filter(v => v > 0).length / n;
   track = { d, p, r, a, hit, up, n, live: true }; trackKey = key;
   if (last){ readout(last, lastMs); drawTrend(last); }
+}
+/* ---------- past top / bottom timing ----------
+   Cycle top = highest close in the first 700 days after a halving; bottom = lowest close in the 500 days after
+   that top.  Windows for a cycle use only the cycles completed before it, in days after the halving. */
+function cycleMarks(j){
+  const i0 = Math.round((HAL[j] - PX.t0) / DAY), iNext = Math.round((HAL[j + 1] - PX.t0) / DAY), iEnd = Math.min(iNext, PX.p.length - 1);
+  if (iEnd <= i0) return null;
+  let it = i0; for (let i = i0; i <= Math.min(i0 + 700, iEnd); i++) if (PX.p[i] > PX.p[it]) it = i;
+  let ib = it; for (let i = it; i <= Math.min(it + 500, iEnd); i++) if (PX.p[i] < PX.p[ib]) ib = i;
+  return { top: it - i0, bot: ib - i0, topP: PX.p[it], botP: PX.p[ib], done: iEnd >= iNext, botFinal: iEnd >= Math.min(it + 500, iNext) };
+}
+function timingWindows(k){
+  const past = []; for (let j = 0; j < k; j++){ const m = cycleMarks(j); if (m && m.done) past.push(Object.assign({ j }, m)); }
+  if (!past.length) return { past };
+  const win = key => { const ds = past.map(m => m[key]); return { a: HAL[k] + Math.min(...ds) * DAY, b: HAL[k] + Math.max(...ds) * DAY, days: ds }; };
+  return { past, top: win('top'), bot: win('bot') };
+}
+function drawCycle(){
+  const k = state.cur, TW = timingWindows(k), cur = cycleMarks(k), [g, W, H] = setupCanvas($('cyc'));
+  const L = 54, R = 12, T = 22, B = 22, pw = W - L - R, ph = H - T - B, a = HAL[k], b = HAL[k + 1];
+  const i0 = Math.round((a - PX.t0) / DAY), i1 = Math.min(Math.round((b - PX.t0) / DAY), PX.p.length - 1);
+  let lo = Infinity, hi = -Infinity; for (let i = i0; i <= i1; i++){ lo = Math.min(lo, PX.p[i]); hi = Math.max(hi, PX.p[i]); }
+  lo *= 0.85; hi *= 1.12;
+  const X = t => L + (t - a) / (b - a) * pw, Y = v => T + (1 - Math.log(v / lo) / Math.log(hi / lo)) * ph;
+  g.clearRect(0, 0, W, H); g.font = '11px system-ui';
+  g.fillStyle = css('--mute'); g.textAlign = 'left';
+  g.fillText('Cycle ' + (k + 1) + ': where past cycles topped and bottomed (days after the halving)', L, 12);
+  const band = (w, col, lab) => {
+    if (!w) return;
+    g.fillStyle = col + '22'; g.fillRect(X(w.a), T, Math.max(2, X(w.b) - X(w.a)), ph);
+    g.strokeStyle = col; g.lineWidth = 2; const yb = T + ph - 8;                     // error bar: min .. max
+    g.beginPath(); g.moveTo(X(w.a), yb); g.lineTo(X(w.b), yb); g.moveTo(X(w.a), yb - 5); g.lineTo(X(w.a), yb + 5); g.moveTo(X(w.b), yb - 5); g.lineTo(X(w.b), yb + 5); g.stroke();
+    let px = -1e9, lift = 0;
+    TW.past.map(m => [m, X(a + m[lab === 'top' ? 'top' : 'bot'] * DAY)]).sort((u, v) => u[1] - v[1]).forEach(([m, x]) => {
+      lift = x - px < 16 ? lift + 10 : 0; px = x;                                   // stagger labels that would overlap
+      g.fillStyle = col; g.beginPath(); g.arc(x, yb, 3.2, 0, 7); g.fill();
+      g.font = '10px system-ui'; g.textAlign = 'center'; g.fillText('C' + (m.j + 1), x, yb - 8 - lift); g.font = '11px system-ui'; });
+  };
+  band(TW.top, css('--bad'), 'top'); band(TW.bot, css('--good'), 'bot');
+  // grid + axis
+  g.strokeStyle = css('--line'); g.lineWidth = 1; g.fillStyle = css('--mute'); g.textAlign = 'right';
+  let ticks = []; for (let e = 2; e <= 7; e++) for (const m of [1, 2, 5]) ticks.push(m * 10 ** e); ticks = ticks.filter(v => v > lo && v < hi);
+  if (ticks.length > 6) ticks = ticks.filter((_, i) => i % 2 === 0);
+  ticks.forEach(v => { g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R, Y(v)); g.stroke(); g.fillText('$' + (v >= 1e6 ? v / 1e6 + 'M' : v >= 1e3 ? v / 1e3 + 'k' : v), L - 6, Y(v) + 4); });
+  g.textAlign = 'center';
+  for (let y = new Date(a).getUTCFullYear(); y <= new Date(b).getUTCFullYear(); y++){ const t = Date.UTC(y, 0, 1); if (t > a && t < b) g.fillText(String(y), X(t), H - 6); }
+  // price: known up to as-of solid, after faded
+  const iA = Math.min(i1, Math.round((state.asOf - PX.t0) / DAY));
+  const path = (from, to) => { g.beginPath(); for (let i = from; i <= to; i++){ const x = X(PX.t0 + i * DAY), y = Y(PX.p[i]); i === from ? g.moveTo(x, y) : g.lineTo(x, y); } g.stroke(); };
+  g.lineWidth = 1.8; g.strokeStyle = css('--g3'); path(i0, iA);
+  if (i1 > iA){ g.globalAlpha = 0.4; path(iA, i1); g.globalAlpha = 1; }
+  // this cycle's top / low so far
+  if (cur){
+    const mk = (d, v, col, lab) => { const x = X(a + d * DAY), y = Y(v); g.strokeStyle = col; g.lineWidth = 2; g.fillStyle = css('--bg'); g.beginPath(); g.arc(x, y, 4.5, 0, 7); g.fill(); g.stroke();
+      g.fillStyle = col; g.textAlign = x > W - 140 ? 'right' : 'left'; g.fillText(lab, x + (x > W - 140 ? -8 : 8), y + (lab.startsWith('top') ? -6 : 14)); };
+    mk(cur.top, cur.topP, css('--bad'), (cur.done ? 'top ' : 'top so far ') + fmtUsd(cur.topP));
+    if (cur.bot > cur.top) mk(cur.bot, cur.botP, css('--good'), (cur.botFinal ? 'low ' : 'low so far ') + fmtUsd(cur.botP) + ' (' + Math.round((cur.botP / cur.topP - 1) * 100) + '%)');
+  }
+  const xa = X(state.asOf); g.strokeStyle = css('--accent'); g.lineWidth = 1.5; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(xa, T); g.lineTo(xa, T + ph); g.stroke(); g.setLineDash([]);
+  // note
+  const f = t => new Date(t).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+  if (TW.top){
+    const dd = arr => arr.map((d, i) => 'C' + (TW.past[i].j + 1) + ' ' + d).join(', ');
+    $('cycNote').textContent = 'Past tops landed ' + dd(TW.top.days) + ' days after the halving (' + f(TW.top.a) + ' – ' + f(TW.top.b) + ' this cycle); past bottoms ' +
+      dd(TW.bot.days) + ' days (' + f(TW.bot.a) + ' – ' + f(TW.bot.b) + '). Bars span the earliest to latest past cycle; dots are each cycle. ' +
+      'Only cycles completed before this one are used. Top = highest close in the first 700 days; bottom = lowest close in the 500 days after it.';
+  } else $('cycNote').textContent = '';
 }
 function drawStrip(){
   const [g, W, H] = setupCanvas($('strip')), a = HAL[2], b = lastDate(), L = 4, R = 4, T = 4, B = 4, pw = W - L - R, ph = H - T - B;
@@ -738,7 +815,7 @@ function sliders(){ $('gmV').textContent = state.gamma.toFixed(2); $('clV').text
 $('gamma').addEventListener('input', e => { state.gamma = +e.target.value; sliders(); schedule(); });
 $('clip').addEventListener('input', e => { state.clip = +e.target.value; sliders(); refreshSignals(state.asOf); engine.setSig && engine.setSig(); schedule(); });
 ['smooth', 'l2'].forEach(id => $(id).addEventListener('input', () => { sliders(); schedule(); }));
-addEventListener('resize', () => { if (last){ draw(last); drawStrip(); drawTrend(last); } drawOpt(); });
+addEventListener('resize', () => { if (last){ draw(last); drawStrip(); drawCycle(); drawTrend(last); } drawOpt(); });
 
 (async () => {
   try { engine = await loadWasm(); $('badge').textContent = 'Rust · WebAssembly'; $('badge').classList.add('rust'); }
